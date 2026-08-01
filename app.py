@@ -1,9 +1,8 @@
 import streamlit as st
-from pypdf import PdfReader
 import os
 
 # -----------------------------------------------------------------------------
-# 1. Page Configuration & Theme Settings
+# 1. Configuration & Performance Caching
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Roche Assistant",
@@ -13,8 +12,72 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. State Initialization (Language, Theme, Device, Page Navigation)
+# 2. Advanced Dynamic CSS (High-End Lab UI)
 # -----------------------------------------------------------------------------
+dark_theme = """
+<style>
+    /* Main Background & Text */
+    .stApp {
+        background: #0B0F19;
+        color: #F3F4F6;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    
+    /* Modern Glassmorphic Cards */
+    .device-card {
+        background: rgba(17, 24, 39, 0.7);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 20px;
+        padding: 24px;
+        margin-bottom: 20px;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+    }
+    .device-card:hover {
+        transform: translateY(-6px);
+        border-color: #0066CC;
+        box-shadow: 0 20px 40px -15px rgba(0, 102, 204, 0.3);
+    }
+    
+    /* Buttons Styling */
+    .stButton > button {
+        border-radius: 12px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+    }
+</style>
+"""
+
+light_theme = """
+<style>
+    .stApp {
+        background: #F8FAFC;
+        color: #0F172A;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    .device-card {
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        border-radius: 20px;
+        padding: 24px;
+        margin-bottom: 20px;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
+    }
+    .device-card:hover {
+        transform: translateY(-6px);
+        border-color: #0066CC;
+        box-shadow: 0 12px 30px -10px rgba(0, 102, 204, 0.15);
+    }
+    .stButton > button {
+        border-radius: 12px;
+        font-weight: 600;
+    }
+</style>
+"""
+
+# State Management
 if "lang" not in st.session_state:
     st.session_state.lang = "English"
 
@@ -27,104 +90,59 @@ if "selected_device" not in st.session_state:
 if "current_page" not in st.session_state:
     st.session_state.current_page = "Home"
 
-# Translations Dictionary
+# Apply Theme CSS
+if st.session_state.theme == "Dark":
+    st.markdown(dark_theme, unsafe_allow_html=True)
+elif st.session_state.theme == "Light":
+    st.markdown(light_theme, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 3. Language Dictionary
+# -----------------------------------------------------------------------------
 translations = {
     "English": {
-        "title": "Roche Smart Assistant",
-        "subtitle": "Next-Generation Medical Diagnostics & Technical Knowledge Platform",
-        "select_device": "Select Diagnostic Analyzer",
-        "change_device": "← Change Analyzer",
-        "theme_label": "Appearance Theme",
+        "title": "Roche Assistant Portal",
+        "subtitle": "Advanced Medical Diagnostics & Interactive Technical Intelligence Hub",
+        "select_device": "Select Clinical Analyzer",
+        "change_device": "← Back to Analyzers",
+        "theme_label": "Theme / المظهر",
         "lang_label": "Language / اللغة",
-        "search_device_placeholder": "Enter analyzer name (e.g., cobas e 411)...",
-        "option_ai": "AI Assistant & Troubleshooting",
+        "option_ai": "AI Diagnostics & Support",
         "option_manual": "Full Manual Viewer",
-        "option_parts": "Component & Hardware Explorer",
-        "ai_header": "AI Diagnostic Companion",
-        "manual_header": "Official Device Manual",
-        "parts_header": "Analyzer Components & Functions",
-        "ask_placeholder": "Ask anything about errors, maintenance, or operations...",
-        "no_pdf": "PDF Manual not found for this device. Please upload it in the data folder.",
-        "parts_search": "Search for a specific component...",
+        "option_parts": "Component Explorer",
+        "ask_placeholder": "Ask about error codes, maintenance steps, or system operations...",
+        "no_pdf": "Catalog PDF not found in /data directory.",
     },
     "العربية": {
-        "title": "مساعد روش الذكي | Roche Assistant",
-        "subtitle": "منصة الجيل القادم للتشخيص الطبي والمعرفة التقنية",
+        "title": "منصة روش الذكية | Roche Assistant",
+        "subtitle": "المركز التفاعلي للتشخيص الطبي المتقدم والمعرفة التقنية للأجهزة",
         "select_device": "اختر جهاز التحليل الطبي",
-        "change_device": "← تغيير الجهاز",
-        "theme_label": "مظهر التطبيق",
+        "change_device": "← العودة لجميع الأجهزة",
+        "theme_label": "المظهر / Theme",
         "lang_label": "اللغة / Language",
-        "search_device_placeholder": "اكتب اسم الجهاز (مثال: cobas e 411)...",
         "option_ai": "المساعد الذكي وحل الأعطال (AI)",
-        "option_manual": "استعراض الكتالوج الكامل (PDF)",
-        "option_parts": "استكشاف قطع الجهاز ووظائفها",
-        "ai_header": "المساعد الذكي للتشخيص",
-        "manual_header": "الكتالوج والدليل الرسمي للجهاز",
-        "parts_header": "مكونات الجهاز وقطع الغيار ووظائفها",
-        "ask_placeholder": "اسأل عن الأعطال، الصيانة، أو تعليمات التشغيل...",
-        "no_pdf": "ملف الكتالوج (PDF) غير متوفر لهذا الجهاز حالياً.",
-        "parts_search": "ابحث عن قطعة أو جزء معين في الجهاز...",
+        "option_manual": "استعراض الكتالوج (PDF)",
+        "option_parts": "مكونات الجهاز وقطع الغيار",
+        "ask_placeholder": "اسأل عن رموز الأعطال، خطة الصيانة، أو تعليمات التشغيل...",
+        "no_pdf": "ملف الكتالوج (PDF) غير متوفر في مجلد البيانات حالياً.",
     }
 }
 
 t = translations[st.session_state.lang]
 
 # -----------------------------------------------------------------------------
-# 3. Dynamic Custom CSS (Custom Branding, Dark/Light Themes)
-# -----------------------------------------------------------------------------
-dark_css = """
-<style>
-    .stApp { background-color: #0E1117; color: #FFFFFF; }
-    .device-card {
-        background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
-        border: 1px solid #374151;
-        border-radius: 16px;
-        padding: 24px;
-        text-align: center;
-        transition: transform 0.3s ease, border-color 0.3s ease;
-    }
-    .device-card:hover { transform: translateY(-5px); border-color: #0066CC; }
-    .stButton>button { border-radius: 8px; font-weight: bold; }
-</style>
-"""
-
-light_css = """
-<style>
-    .stApp { background-color: #F8FAFC; color: #0F172A; }
-    .device-card {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-radius: 16px;
-        padding: 24px;
-        text-align: center;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        transition: transform 0.3s ease;
-    }
-    .device-card:hover { transform: translateY(-5px); border-color: #0066CC; }
-    .stButton>button { border-radius: 8px; font-weight: bold; }
-</style>
-"""
-
-if st.session_state.theme == "Dark":
-    st.markdown(dark_css, unsafe_allow_html=True)
-elif st.session_state.theme == "Light":
-    st.markdown(light_css, unsafe_allow_html=True)
-
-# -----------------------------------------------------------------------------
-# 4. Sidebar Controls (Theme & Language Settings)
+# 4. Sidebar Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=140)
-    st.title("⚙️ Settings")
+    st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=130)
+    st.markdown("### ⚙️ Preference Control")
     
-    # Theme Selection
-    st.session_state.theme = st.radio(
+    st.session_state.theme = st.selectbox(
         t["theme_label"],
         ["Dark", "Light", "Default"],
         index=["Dark", "Light", "Default"].index(st.session_state.theme)
     )
     
-    # Language Selection
     st.session_state.lang = st.selectbox(
         t["lang_label"],
         ["English", "العربية"],
@@ -133,165 +151,129 @@ with st.sidebar:
     
     st.divider()
     if st.session_state.selected_device:
-        st.success(f"📌 Active: **{st.session_state.selected_device}**")
-        if st.button(t["change_device"]):
+        st.info(f"📍 Active Device:\n**{st.session_state.selected_device}**")
+        if st.button(t["change_device"], use_container_width=True):
             st.session_state.selected_device = None
             st.session_state.current_page = "Home"
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 5. Header Section
+# 5. Header
 # -----------------------------------------------------------------------------
-st.title(f"🧪 {t['title']}")
+st.title(f"🔬 {t['title']}")
 st.caption(t["subtitle"])
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 6. Page 1: Device Selection (الراوتر واختيار الجهاز)
+# 6. Page 1: Device Selection (الرئيسية)
 # -----------------------------------------------------------------------------
 if st.session_state.selected_device is None:
-    st.subheader(f"🔍 {t['select_device']}")
+    st.subheader(f"📊 {t['select_device']}")
     
-    # Search Box for Devices
-    search_query = st.text_input("", placeholder=t["search_device_placeholder"])
-    
-    # Sample Devices List (يمكنك إضافة أو تعديل الأجهزة من هنا)
-    devices_database = [
+    # قائمة الأجهزة المحترفة
+    devices = [
         {
-            "id": "cobas_e411",
-            "name": "Roche cobas e 411",
-            "category": "Immunochemistry Analyzer",
+            "id": "e411",
+            "name": "cobas e 411 analyzer",
+            "type": "Immunochemistry Testing",
             "image": "https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=600&q=80",
-            "desc": "Fully automated, random-access analyzer for immunoassay analysis."
+            "desc": "Automated system for immunoassay analysis with ECL technology."
         },
         {
-            "id": "cobas_c311",
-            "name": "Roche cobas c 311",
-            "category": "Clinical Chemistry Analyzer",
+            "id": "c311",
+            "name": "cobas c 311 analyzer",
+            "type": "Clinical Chemistry",
             "image": "https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=600&q=80",
-            "desc": "Automated clinical chemistry analyzer designed for small to medium workloads."
+            "desc": "High-efficiency clinical chemistry analyzer for medium-sized laboratories."
         }
     ]
     
-    cols = st.columns(2)
-    for index, dev in enumerate(devices_database):
-        if search_query.lower() in dev["name"].lower() or search_query == "":
-            with cols[index % 2]:
-                st.image(dev["image"], use_container_width=True)
-                st.markdown(f"### {dev['name']}")
-                st.caption(dev["category"])
-                st.write(dev["desc"])
-                if st.button(f"Select {dev['name']}", key=dev["id"]):
-                    st.session_state.selected_device = dev["name"]
-                    st.session_state.current_page = "AI"
-                    st.rerun()
+    col1, col2 = st.columns(2)
+    for idx, dev in enumerate(devices):
+        target_col = col1 if idx % 2 == 0 else col2
+        with target_col:
+            st.markdown(f"""
+            <div class="device-card">
+                <h3>{dev['name']}</h3>
+                <p style="color: #0066CC; font-weight: 600;">{dev['type']}</p>
+                <p>{dev['desc']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            st.image(dev['image'], use_container_width=True)
+            if st.button(f"Select {dev['name']}", key=dev['id'], use_container_width=True):
+                st.session_state.selected_device = dev['name']
+                st.session_state.current_page = "AI"
+                st.rerun()
 
 # -----------------------------------------------------------------------------
-# 7. Page 2: Device Hub & Navigation Options (بعد اختيار الجهاز)
+# 7. Page 2: Device Portal Options
 # -----------------------------------------------------------------------------
 else:
-    # Top Navigation Tabs for Options
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    nav_col1, nav_col2, nav_col3 = st.columns(3)
+    with nav_col1:
         if st.button(f"🤖 {t['option_ai']}", use_container_width=True):
             st.session_state.current_page = "AI"
-    with col2:
+    with nav_col2:
         if st.button(f"📖 {t['option_manual']}", use_container_width=True):
             st.session_state.current_page = "Manual"
-    with col3:
+    with nav_col3:
         if st.button(f"🔬 {t['option_parts']}", use_container_width=True):
             st.session_state.current_page = "Parts"
 
     st.divider()
 
-    # -------------------------------------------------------------------------
-    # Option A: AI Technical Assistant
-    # -------------------------------------------------------------------------
+    # Option A: AI Assistant
     if st.session_state.current_page == "AI":
-        st.subheader(f"🤖 {t['ai_header']} - {st.session_state.selected_device}")
+        st.subheader(f"🤖 {t['option_ai']} — {st.session_state.selected_device}")
         
-        # Chat History Container
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
         if user_prompt := st.chat_input(t["ask_placeholder"]):
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
-            # AI Logic (Response Generation Placeholder for local processing)
             with st.chat_message("assistant"):
-                response_text = f"**[Roche AI System]**: Received query regarding `{st.session_state.selected_device}`: '{user_prompt}'. Analyzing local manual database..."
-                st.markdown(response_text)
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
+                ans = f"**[Roche AI]**: Query processed for `{st.session_state.selected_device}`: '{user_prompt}'. Searching device manuals..."
+                st.markdown(ans)
+                st.session_state.messages.append({"role": "assistant", "content": ans})
 
-    # -------------------------------------------------------------------------
-    # Option B: Full Manual Viewer
-    # -------------------------------------------------------------------------
+    # Option B: Manual Viewer
     elif st.session_state.current_page == "Manual":
-        st.subheader(f"📖 {t['manual_header']} - {st.session_state.selected_device}")
+        st.subheader(f"📖 {t['option_manual']} — {st.session_state.selected_device}")
+        pdf_file = "data/cobas_e411_manual.pdf"
         
-        # يمكنك وضع اسم ملف الـ PDF الخاص بالجهاز هنا
-        pdf_path = "data/cobas_e411_manual.pdf"
-        
-        if os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as f:
-                st.download_button(
-                    label="📥 Download Full PDF Manual",
-                    data=f,
-                    file_name="cobas_e411_manual.pdf",
-                    mime="application/pdf"
-                )
-            st.info("Interactive PDF Viewer integrated below:")
-            # Simple Embedded PDF Viewer
-            st.markdown(f'<iframe src="{pdf_path}" width="100%" height="800px"></iframe>', unsafe_allow_html=True)
+        if os.path.exists(pdf_file):
+            with open(pdf_file, "rb") as f:
+                st.download_button("📥 Download Official Manual (PDF)", f, file_name="manual.pdf")
         else:
             st.warning(t["no_pdf"])
 
-    # -------------------------------------------------------------------------
-    # Option C: Hardware Parts & Functions Explorer
-    # -------------------------------------------------------------------------
+    # Option C: Hardware Components
     elif st.session_state.current_page == "Parts":
-        st.subheader(f"🔬 {t['parts_header']} - {st.session_state.selected_device}")
+        st.subheader(f"🔬 {t['option_parts']} — {st.session_state.selected_device}")
         
-        # بيانات القطع والصور (يمكنك إضافتها وتعديلها بسهولة من هنا)
-        components_data = [
+        parts = [
             {
-                "name_en": "ECL Measuring Cell",
-                "name_ar": "خلية القياس الكهروكيميائية (ECL)",
-                "image": "https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=400&q=80",
-                "desc_en": "Core component where ElectrochemiLuminescence reaction occurs and light signal is detected.",
-                "desc_ar": "القطعة الأساسية التي يتم فيها تفاعل التلألؤ الكهروكيميائي وقياس الإشارة الضوئية للتحليل."
+                "name": "ECL Measuring Cell" if st.session_state.lang == "English" else "خلية قياس ECL",
+                "img": "https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=400&q=80",
+                "desc": "Electrochemiluminescence detection system." if st.session_state.lang == "English" else "نظام قياس التلألؤ الكهروكيميائي لقياس العينات بدقة."
             },
             {
-                "name_en": "Sample & Reagent Pipettor Arm",
-                "name_ar": "ذراع سحب العينات والمواصفات",
-                "image": "https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=400&q=80",
-                "desc_en": "Precision liquid handling system equipped with liquid level detection and clash protection.",
-                "desc_ar": "نظام دقيق لنقل السوائل مزود بحساسات لمستوى السائل وحماية من الاصطدام."
-            },
-            {
-                "name_en": "Incubator Incubator Assembly",
-                "name_ar": "حاضنة التفاعلات (Incubator)",
-                "image": "https://images.unsplash.com/photo-1532187863486-abf9dbad1b69?auto=format&fit=crop&w=400&q=80",
-                "desc_en": "Maintains precise 37°C temperature control for optimal assay incubation time.",
-                "desc_ar": "تحافظ على درجة حرارة دقيقة 37 درجة مئوية لضمان الوقت المثالي لحضن التفاعلات الطبية."
+                "name": "Sample Pipettor Arm" if st.session_state.lang == "English" else "ذراع سحب العينات",
+                "img": "https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=400&q=80",
+                "desc": "Precision robotic arm for liquid handling." if st.session_state.lang == "English" else "ذراع روبوتية دقيقة لسحب ونقل السوائل والمواصفات."
             }
         ]
         
-        part_search = st.text_input(t["parts_search"])
-        
-        part_cols = st.columns(3)
-        for idx, part in enumerate(components_data):
-            name = part["name_ar"] if st.session_state.lang == "العربية" else part["name_en"]
-            desc = part["desc_ar"] if st.session_state.lang == "العربية" else part["desc_en"]
-            
-            if part_search.lower() in name.lower() or part_search == "":
-                with part_cols[idx % 3]:
-                    st.image(part["image"], use_container_width=True)
-                    st.markdown(f"#### {name}")
-                    st.write(desc)
+        p_cols = st.columns(2)
+        for i, p in enumerate(parts):
+            with p_cols[i % 2]:
+                st.image(p["img"], use_container_width=True)
+                st.markdown(f"#### {p['name']}")
+                st.write(p["desc"])
