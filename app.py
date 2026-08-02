@@ -1,5 +1,11 @@
 import streamlit as st
 import os
+import glob
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
+from google import genai
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Optimizations
@@ -12,7 +18,111 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. State Management Initialization
+# 2. RAG Engine & Caching Functions (سرعة فائقة)
+# -----------------------------------------------------------------------------
+@st.cache_resource
+def load_embedding_model():
+    # نموذج خفيف وسريع جداً لعمل Embeddings محلياً
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+@st.cache_resource
+def process_manuals_rag(data_dir="data"):
+    """قراءة كل ملفات الـ PDF وتجزئتها وبناء فهرس FAISS للبحث اللحظي"""
+    chunks = []
+    if not os.path.exists(data_dir):
+        return None, []
+        
+    pdf_files = glob.glob(os.path.join(data_dir, "*.pdf"))
+    if not pdf_files:
+        return None, []
+
+    for pdf_path in pdf_files:
+        try:
+            reader = PdfReader(pdf_path)
+            doc_name = os.path.basename(pdf_path)
+            for page_num, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    # تقسيم النص لقطع صغيرة لرفع دقة استرجاع الإجابة
+                    words = text.split()
+                    for i in range(0, len(words), 200):
+                        chunk_text = " ".join(words[i:i+250])
+                        chunks.append({
+                            "text": chunk_text,
+                            "source": f"{doc_name} (Page {page_num+1})"
+                        })
+        except Exception as e:
+            st.error(f"Error reading {pdf_path}: {e}")
+
+    if not chunks:
+        return None, []
+
+    model = load_embedding_model()
+    texts = [c["text"] for c in chunks]
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    
+    # بناء كشاف FAISS
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(np.array(embeddings).astype('float32'))
+    
+    return index, chunks
+
+def query_rag(query_text, index, chunks, top_k=3):
+    """البحث عن أكثر النصوص صلة بالسؤال داخل المانيوال"""
+    if index is None or not chunks:
+        return ""
+    
+    model = load_embedding_model()
+    query_vector = model.encode([query_text], convert_to_numpy=True)
+    distances, indices = index.search(np.array(query_vector).astype('float32'), top_k)
+    
+    retrieved_context = ""
+    for idx in indices[0]:
+        if idx < len(chunks):
+            retrieved_context += f"\n--- Source: {chunks[idx]['source']} ---\n{chunks[idx]['text']}\n"
+            
+    return retrieved_context
+
+def generate_ai_response(prompt, context, device_name, lang):
+    """توليد الإجابة الكاملة من المانيوال باستخدام Gemini API"""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    
+    # في حال عدم وجود المفتاح أو ملفات المانيوال يتم استخدام نظام الإجابة التوليدية المستندة إلى سياق النظام
+    if not api_key:
+        return f"⚠️ **API Key Missing**: Please configure `GEMINI_API_KEY` in Streamlit Secrets.\n\n**Extracted Context from Manual:**\n{context}" if context else "Please upload manual PDFs to `/data` directory."
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        system_instruction = f"""
+        You are an expert technical support engineer for Roche Diagnostics specializing in {device_name}.
+        Your goal is to provide full, comprehensive, detailed, step-by-step answers to technical queries.
+        Never just quote section numbers. Provide the exact procedure, troubleshooting steps, and operational guidelines directly from the provided manual context.
+        Language of response: {lang}.
+        """
+        
+        user_message = f"""
+        Device: {device_name}
+        User Query: {prompt}
+        
+        Manual Context Retrieved:
+        {context if context else 'No direct manual text found. Answer using general technical standards for this device.'}
+        
+        Please provide a detailed and complete technical answer based on the manual context above.
+        """
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_message,
+            config={'system_instruction': system_instruction}
+        )
+        return response.text
+    except Exception as e:
+        return f"Error communicating with AI model: {str(e)}"
+
+# -----------------------------------------------------------------------------
+# 3. State Management Initialization
 # -----------------------------------------------------------------------------
 if "lang" not in st.session_state:
     st.session_state.lang = "English"
@@ -30,9 +140,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # -----------------------------------------------------------------------------
-# 3. Dynamic Global Theme & Subdued Low-Contrast Background
+# 4. Dynamic Global Theme & Low-Contrast Background Styling
 # -----------------------------------------------------------------------------
-# صورة خلفية موحدة لجهاز روش بتباين ضعيف جداً ومظهر عالمي محترف
 global_roche_bg = "https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=1920&q=80"
 
 if st.session_state.theme == "Dark":
@@ -40,17 +149,16 @@ if st.session_state.theme == "Dark":
     text_color = "#F1F5F9"
     card_bg = "rgba(15, 23, 42, 0.80)"
     card_border = "rgba(255, 255, 255, 0.08)"
-    overlay_color = "rgba(7, 10, 16, 0.94)"  # طبقة تعتيم بنسبة 94% لجعل الكونتراست خفيف جداً
-else:  # Light
+    overlay_color = "rgba(7, 10, 16, 0.94)"
+else:
     bg_color = "#F8FAFC"
     text_color = "#0F172A"
     card_bg = "rgba(255, 255, 255, 0.88)"
     card_border = "rgba(0, 102, 204, 0.15)"
-    overlay_color = "rgba(248, 250, 252, 0.94)"  # طبقة تفتيح بنسبة 94%
+    overlay_color = "rgba(248, 250, 252, 0.94)"
 
 custom_css = f"""
 <style>
-    /* Global Subdued Background Watermark */
     .stApp {{
         background-color: {bg_color};
         background-image: linear-gradient({overlay_color}, {overlay_color}), url('{global_roche_bg}');
@@ -61,7 +169,6 @@ custom_css = f"""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }}
 
-    /* Global Modern Card Styling */
     .glass-card {{
         background: {card_bg};
         backdrop-filter: blur(16px);
@@ -80,7 +187,6 @@ custom_css = f"""
         box-shadow: 0 20px 35px -10px rgba(0, 102, 204, 0.25);
     }}
 
-    /* Modern Minimalist Buttons */
     .stButton > button {{
         border-radius: 10px;
         font-weight: 600;
@@ -92,47 +198,46 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 4. Dictionary & Translation Layer
+# 5. Translations Layer
 # -----------------------------------------------------------------------------
 translations = {
     "English": {
         "title": "Roche Enterprise Assistant",
-        "subtitle": "Global Technical Diagnostics & Intelligent Knowledge Base",
+        "subtitle": "Global Technical Diagnostics & RAG Manual Assistant",
         "select_device": "Select Clinical System",
         "change_device": "← Switch System",
         "theme_label": "Theme / المظهر",
         "lang_label": "Language / اللغة",
-        "option_ai": "AI Assistant & Diagnostics",
+        "option_ai": "AI Assistant & Full Manual Diagnostics",
         "option_manual": "Technical Documentation",
         "option_parts": "System Components",
-        "ask_placeholder": "Ask Roche AI (e.g., Error codes, calibration, maintenance protocols)...",
+        "ask_placeholder": "Ask any question (e.g., How to fix error E-04? What is the daily maintenance steps?)...",
         "no_pdf": "Official PDF manual is missing in /data folder.",
     },
     "العربية": {
         "title": "منصة روش التشخيصية العالمية",
-        "subtitle": "المنظمة المتقدمة للذكاء الاصطناعي والدعم الفني لأجهزة التحليل الطبية",
+        "subtitle": "المنظمة المتقدمة للذكاء الاصطناعي والدليل التشغيلي المباشر للأجهزة",
         "select_device": "اختر نظام التحليل الطبي",
         "change_device": "← تغيير الجهاز",
         "theme_label": "المظهر / Theme",
         "lang_label": "اللغة / Language",
-        "option_ai": "المساعد الذكي وحل الأعطال (AI)",
+        "option_ai": "المساعد الذكي وحل الأعطال من المانيوال",
         "option_manual": "الدليل المباشر (PDF)",
         "option_parts": "مكونات النظام وقطع الغيار",
-        "ask_placeholder": "اطرح سؤالك على المساعد الذكي (مثل: أكواد الأعطال، خطوات المعايرة والصيانة)...",
+        "ask_placeholder": "اسأل عن أي خطوة تفصيلية (مثال: ما هي خطوات الصيانة اليومية؟ كيف نعالج كود الخطأ E-04؟)...",
         "no_pdf": "ملف PDF الكتالوج غير متوفر في مجلد البيانات حالياً.",
     }
 }
 t = translations[st.session_state.lang]
 
 # -----------------------------------------------------------------------------
-# 5. Sidebar Controls (Dark & Light Only)
+# 6. Sidebar Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=120)
     st.markdown("---")
     st.markdown("### ⚙️ System Settings")
     
-    # اختيار Dark و Light فقط
     st.session_state.theme = st.selectbox(
         t["theme_label"],
         ["Dark", "Light"],
@@ -154,20 +259,19 @@ with st.sidebar:
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 6. Global Header
+# 7. Global Header
 # -----------------------------------------------------------------------------
 st.title(f"🔬 {t['title']}")
 st.caption(t["subtitle"])
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 7. Device Selection View
+# 8. Main Device Selection View
 # -----------------------------------------------------------------------------
 if st.session_state.selected_device is None:
     st.subheader(f"📊 {t['select_device']}")
     
     col1, col2 = st.columns(2)
-    
     with col1:
         st.markdown("""
         <div class="glass-card">
@@ -197,7 +301,7 @@ if st.session_state.selected_device is None:
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 8. Active System Navigation & Modules
+# 9. Active System Navigation & Full RAG AI Integration
 # -----------------------------------------------------------------------------
 else:
     nav1, nav2, nav3 = st.columns(3)
@@ -216,10 +320,14 @@ else:
 
     st.markdown("---")
 
-    # Module 1: AI Assistant
+    # Module 1: AI Assistant (Full Manual RAG)
     if st.session_state.current_page == "AI":
         st.subheader(f"🤖 {t['option_ai']} — {st.session_state.selected_device}")
         
+        # تحميل وتجهيز بيانات المانيوال بالخلفية
+        with st.spinner("Indexing manuals for real-time extraction..."):
+            index, chunks = process_manuals_rag("data")
+            
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -230,9 +338,14 @@ else:
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                response = f"**[Roche AI Diagnostic Hub]**:\n\nQuery analyzed for **{st.session_state.selected_device}** regarding: *'{user_prompt}'*.\n\n" \
-                           f"• **Status**: Knowledge base cross-referenced.\n" \
-                           f"• **Recommendation**: Refer to system operator manual Section 4.2 for sensor check."
+                with st.spinner("Searching manual & generating step-by-step solution..."):
+                    context = query_rag(user_prompt, index, chunks)
+                    response = generate_ai_response(
+                        user_prompt, 
+                        context, 
+                        st.session_state.selected_device, 
+                        st.session_state.lang
+                    )
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
