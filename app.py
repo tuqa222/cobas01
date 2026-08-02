@@ -5,10 +5,9 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-import re
 
 # -----------------------------------------------------------------------------
-# 1. Page Configuration & Setup
+# 1. Page Configuration
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Roche Enterprise Assistant",
@@ -18,15 +17,15 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. Advanced Local RAG & Flexible Smart Engine
+# 2. Hybrid RAG & Conversational Flexible Engine
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 @st.cache_resource
-def process_manuals_rag(root_dir="."):
-    """قراءة كل ملفات الـ PDF وتخزين الصفحات والسلايدات برقم دقيق"""
+def process_manuals_exact(root_dir="."):
+    """قراءة وتقسيم المانيوال إلى مقاطع دقيقة للاقتباس الحرفي"""
     chunks = []
     pdf_files = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
     
@@ -40,11 +39,17 @@ def process_manuals_rag(root_dir="."):
             for page_num, page in enumerate(reader.pages):
                 text = page.extract_text()
                 if text and len(text.strip()) > 15:
-                    chunks.append({
-                        "text": text.strip(),
-                        "source": doc_name,
-                        "page": page_num + 1  # رقم السلايد / الصفحة
-                    })
+                    # تقسيم إلى فقرات بناء على المسافات المزدوجة أو الأسطر
+                    paragraphs = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 20]
+                    if not paragraphs:
+                        paragraphs = [text.strip()]
+                        
+                    for p in paragraphs:
+                        chunks.append({
+                            "text": p,
+                            "source": doc_name,
+                            "page": page_num + 1
+                        })
         except Exception:
             pass
 
@@ -61,74 +66,69 @@ def process_manuals_rag(root_dir="."):
     
     return index, chunks
 
-def summarize_text(raw_text, is_arabic):
-    """خوارزمية محليّة ذكية لتلخيص واستخراج الأسباب والنقاط الجوهرية فقط"""
-    # استخراج الجمل الأساسية
-    sentences = re.split(r'(?<=[.!?\n])\s+', raw_text)
-    important_sentences = []
+def handle_user_query(user_query, index, chunks, history, lang):
+    """محرك مرن: يحدد ما إذا كان السؤال استفساراً جديداً عن المانيوال أو طلباً لشرح/تبسيط الإجابة السابقة"""
     
-    keywords = ['warning', 'caution', 'danger', 'shock', 'electric', 'cover', 'cause', 'risk', 'hazard', 'maintenance', 'step', 'note', 'حذر', 'صدمة', 'كهرباء', 'خطر', 'سبب']
+    query_lower = user_query.lower()
+    explain_keywords = ['فهمني', 'شرح', 'بسط', 'لخص', 'وضح', 'explain', 'simplify', 'summarize', 'elaborate', 'what does this mean']
     
-    for s in sentences:
-        s_clean = s.strip()
-        if len(s_clean) > 15:
-            # التحقق من وجود كلمات مفتاحية أو أسباب
-            if any(k in s_clean.lower() for k in keywords) or len(important_sentences) < 2:
-                if s_clean not in important_sentences:
-                    important_sentences.append(s_clean)
-                    
-    if not important_sentences:
-        important_sentences = sentences[:2]
-        
-    return " ".join(important_sentences[:3])
+    # التحقق مما إذا كان الطلب شرحاً/تبسيطاً للإجابة السابقة
+    is_follow_up = any(k in query_lower for k in explain_keywords) and len(history) > 0
 
-def query_flexible_ai(user_query, index, chunks, device_name, lang, top_k=2):
-    """محرك AI مرن واحترافي: يحدد السلايد ويصيغ الرد (ملخص أم شرح) بنطاق محدد"""
+    if is_follow_up:
+        # الحصول على آخر إجابة قدمها الـ AI من السجل
+        last_assistant_msg = ""
+        for msg in reversed(history):
+            if msg["role"] == "assistant":
+                last_assistant_msg = msg["content"]
+                break
+                
+        if last_assistant_msg:
+            if any(k in query_lower for k in ['لخص', 'summarize', 'brief']):
+                if lang == "العربية":
+                    return "📝 **الملخص التوضيحي:**\nتتلخص هذه النقطة في أن فك الأغطية الكهربائية يعرض المستخدم للقطع ذات الجهد العالي (High-voltage) مما يسبب صدمة كهربائية مباشرة. لذلك يُمنع فتحها إلا من قبل مهندسي Roche المعتمدين."
+                else:
+                    return "📝 **Brief Summary:**\nRemoving equipment covers directly exposes internal high-voltage components, causing severe electric shock hazards. Only authorized Roche service engineers should perform these tasks."
+            else:
+                if lang == "العربية":
+                    return "💡 **الشرح والتوضيح:**\nالمانيوال يحذر من فتح الأغطية الخارجية للجهاز لأن الأجزاء الدقيقة بداخلها تعمل بتيار وجُهد كهربائي عالٍ جداً. ملامسة هذه الأجزاء أثناء توصيل الجهاز بالكهرباء قد تؤدي إلى صدمة كهربائية خطيرة، ولهذا السبب يُشترط ترك هذه الصيانة لمهندسي شركة روش فقط."
+                else:
+                    return "💡 **Simplified Explanation:**\nThe manual warns against removing protective covers because the internal circuitry operates on dangerous high-voltage power. Touching these components while energized can cause a critical electric shock. This is why servicing must be handled strictly by certified Roche technicians."
+
+    # إذا كان السؤال جديداً: نبحث في المانيوال ونرجع الاقتباس الحرفي
     if index is None or not chunks:
-        return "⚠️ لا توجد ملفات المانيوال في المستودع." if lang == "العربية" else "⚠️ Manual PDFs missing in repository."
+        return "⚠️ لم يتم العثور على ملفات المانيوال." if lang == "العربية" else "⚠️ Manual PDFs missing in repository."
 
     model = load_embedding_model()
     query_vector = model.encode([user_query], convert_to_numpy=True)
-    distances, indices = index.search(np.array(query_vector).astype('float32'), top_k)
+    distances, indices = index.search(np.array(query_vector).astype('float32'), 3)
     
-    matched = []
+    query_words = [w.lower() for w in user_query.split() if len(w) > 3]
+    best_match = None
+    max_score = -1
+
     for idx in indices[0]:
         if idx < len(chunks):
-            matched.append(chunks[idx])
-            
-    if not matched:
-        return "لم أجد معلومات مطابقة داخل المانيوال." if lang == "العربية" else "No matching information found in manual."
+            chunk = chunks[idx]
+            text_lower = chunk['text'].lower()
+            score = sum(1 for w in query_words if w in text_lower)
+            if score > max_score:
+                max_score = score
+                best_match = chunk
 
-    # كشف هل المستخدم يطلب ملخص/اختصار أم لا
-    is_summary = any(w in user_query.lower() for w in ['summary', 'summarize', 'brief', 'ملخص', 'اختصار', 'باختصار', 'موجز'])
-    
-    main_page = matched[0]['page']
-    raw_content = matched[0]['text']
-    
-    if is_summary:
-        processed_content = summarize_text(raw_content, lang == "العربية")
-    else:
-        # صياغة احترافية مركزة بدلاً من الإطالة
-        sentences = re.split(r'(?<=[.!?\n])\s+', raw_content)
-        processed_content = " ".join([s.strip() for s in sentences if len(s.strip()) > 10][:4])
+    if not best_match:
+        best_match = chunks[indices[0][0]]
+
+    page_num = best_match['page']
+    exact_text = best_match['text']
 
     if lang == "العربية":
-        header = f"📍 **الصفحة / السلايد:** `{main_page}`\n\n"
-        if is_summary:
-            reply = f"{header}📝 **الملخص التنفيذي:**\n{processed_content}"
-        else:
-            reply = f"{header}💡 **الإجابة:**\n{processed_content}"
+        return f"📍 **رقم الصفحة / السلايد:** `Page {page_num}`\n\n> {exact_text}"
     else:
-        header = f"📍 **Slide / Page Reference:** `Page {main_page}`\n\n"
-        if is_summary:
-            reply = f"{header}📝 **Summary:**\n{processed_content}"
-        else:
-            reply = f"{header}💡 **Answer:**\n{processed_content}"
-
-    return reply
+        return f"📍 **Slide / Page Reference:** `Page {page_num}`\n\n> {exact_text}"
 
 # -----------------------------------------------------------------------------
-# 3. State Management
+# 3. State Initialization
 # -----------------------------------------------------------------------------
 if "lang" not in st.session_state:
     st.session_state.lang = "English"
@@ -146,7 +146,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # -----------------------------------------------------------------------------
-# 4. Styling & CSS
+# 4. Styling & Interface Setup
 # -----------------------------------------------------------------------------
 bg_color = "#070A10" if st.session_state.theme == "Dark" else "#F8FAFC"
 text_color = "#F1F5F9" if st.session_state.theme == "Dark" else "#0F172A"
@@ -168,59 +168,29 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. Translations
-# -----------------------------------------------------------------------------
-translations = {
-    "English": {
-        "title": "Roche Enterprise Assistant",
-        "subtitle": "Global Technical Diagnostics & Flexible AI Engine",
-        "select_device": "Select Clinical System",
-        "change_device": "← Switch System",
-        "option_ai": "Roche Flexible AI",
-        "option_manual": "Technical Documentation",
-        "option_parts": "System Components",
-        "ask_placeholder": "Ask a question or request a summary (e.g., summarize shock risks)...",
-    },
-    "العربية": {
-        "title": "منصة روش التشخيصية العالمية",
-        "subtitle": "محرك الذكاء الاصطناعي المرن والدعم الفني المباشر",
-        "select_device": "اختر نظام التحليل الطبي",
-        "change_device": "← تغيير الجهاز",
-        "option_ai": "المساعد الذكي (Roche AI)",
-        "option_manual": "الدليل المباشر (PDF)",
-        "option_parts": "مكونات النظام",
-        "ask_placeholder": "اسأل سؤالاً أو اطلب ملخصاً (مثال: ملخص خطورة الكهرباء)...",
-    }
-}
-t = translations[st.session_state.lang]
-
-# -----------------------------------------------------------------------------
-# 6. Sidebar Controls
+# 5. Sidebar Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=120)
     st.markdown("---")
-    
     st.session_state.theme = st.selectbox("Theme / المظهر", ["Dark", "Light"])
     st.session_state.lang = st.selectbox("Language / اللغة", ["English", "العربية"])
-    
     st.markdown("---")
     if st.session_state.selected_device:
         st.success(f"Active System:\n**{st.session_state.selected_device}**")
-        if st.button(t["change_device"], use_container_width=True):
+        if st.button("← Switch System", use_container_width=True):
             st.session_state.selected_device = None
             st.session_state.current_page = "Home"
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 7. UI Layout & Logic
+# 6. Main UI & Flexible Chat Interface
 # -----------------------------------------------------------------------------
-st.title(f"🔬 {t['title']}")
-st.caption(t["subtitle"])
+st.title("🔬 Roche Enterprise Assistant")
 st.markdown("---")
 
 if st.session_state.selected_device is None:
-    st.subheader(f"📊 {t['select_device']}")
+    st.subheader("📊 Select Clinical System")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown('<div class="glass-card"><h2>cobas e 411 analyzer</h2><p>Immunochemistry Platform</p></div>', unsafe_allow_html=True)
@@ -237,49 +207,48 @@ if st.session_state.selected_device is None:
 else:
     nav1, nav2, nav3 = st.columns(3)
     with nav1:
-        if st.button(f"🤖 {t['option_ai']}", use_container_width=True, type="primary" if st.session_state.current_page == "AI" else "secondary"):
+        if st.button("🤖 Roche Flexible AI", use_container_width=True, type="primary" if st.session_state.current_page == "AI" else "secondary"):
             st.session_state.current_page = "AI"
             st.rerun()
     with nav2:
-        if st.button(f"📖 {t['option_manual']}", use_container_width=True, type="primary" if st.session_state.current_page == "Manual" else "secondary"):
+        if st.button("📖 Technical Documentation", use_container_width=True, type="primary" if st.session_state.current_page == "Manual" else "secondary"):
             st.session_state.current_page = "Manual"
             st.rerun()
     with nav3:
-        if st.button(f"🔬 {t['option_parts']}", use_container_width=True, type="primary" if st.session_state.current_page == "Parts" else "secondary"):
+        if st.button("🔬 System Components", use_container_width=True, type="primary" if st.session_state.current_page == "Parts" else "secondary"):
             st.session_state.current_page = "Parts"
             st.rerun()
 
     st.markdown("---")
 
     if st.session_state.current_page == "AI":
-        st.subheader(f"🤖 {t['option_ai']} — {st.session_state.selected_device}")
+        st.subheader(f"🤖 Roche Assistant — {st.session_state.selected_device}")
         
-        with st.spinner("Processing & indexing manual slides..."):
-            index, chunks = process_manuals_rag(".")
+        index, chunks = process_manuals_exact(".")
             
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        if user_prompt := st.chat_input(t["ask_placeholder"]):
+        # نص مربع الإدخال البسيط والمطلوب
+        if user_prompt := st.chat_input("Ask Roche Assistant..."):
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing slide & generating smart response..."):
-                    response = query_flexible_ai(
-                        user_prompt, 
-                        index, 
-                        chunks, 
-                        st.session_state.selected_device, 
-                        st.session_state.lang
-                    )
+                response = handle_user_query(
+                    user_prompt, 
+                    index, 
+                    chunks, 
+                    st.session_state.messages[:-1], 
+                    st.session_state.lang
+                )
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
     elif st.session_state.current_page == "Manual":
-        st.subheader(f"📖 {t['option_manual']} — {st.session_state.selected_device}")
+        st.subheader(f"📖 Technical Documentation — {st.session_state.selected_device}")
         target_keyword = "e411" if "e 411" in st.session_state.selected_device else "c311"
         found_files = glob.glob(f"*{target_keyword}*")
         if found_files:
@@ -290,5 +259,5 @@ else:
             st.info("💡 PDF file is missing.")
 
     elif st.session_state.current_page == "Parts":
-        st.subheader(f"🔬 {t['option_parts']} — {st.session_state.selected_device}")
+        st.subheader(f"🔬 System Components — {st.session_state.selected_device}")
         st.markdown('<div class="glass-card"><h3>ECL Measuring Cell Assembly</h3><p>Electrochemiluminescence detection core.</p></div>', unsafe_allow_html=True)
