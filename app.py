@@ -52,7 +52,7 @@ def get_flexible_ai_response(user_prompt, chat_history, manual_context, api_key)
 أنت مساعد ذكي متخصص لشركة Roche Diagnostics ومعدات cobas.
 أمامك دليل الاستخدام/المانيوال التالي المكون من عدة صفحات:
 
-{manual_context[:50000]}  # استخدام نص المانيوال المتاح
+{manual_context[:50000]}
 
 تعليمات التعامل مع المستخدم:
 1. إذا طلب المستخدم معلومات من المانيوال: اذكر رقم الصفحة (Page Number) بدقة، واقتبس المقطع الحرفي أو الإجابة المباشرة.
@@ -60,7 +60,6 @@ def get_flexible_ai_response(user_prompt, chat_history, manual_context, api_key)
 3. كن مرناً، طبيعياً، ودقيقاً في جميع إجاباتك.
 """
 
-        # بناء سجل المحادثة
         formatted_history = []
         for msg in chat_history:
             role = "user" if msg["role"] == "user" else "model"
@@ -96,27 +95,54 @@ if "api_key" not in st.session_state:
     st.session_state.api_key = ""
 
 # -----------------------------------------------------------------------------
-# 4. Styling & Light Contrast UI Setup
+# 4. Background Image & Glassmorphism UI Styling
 # -----------------------------------------------------------------------------
-bg_color = "#0A0D14" if st.session_state.theme == "Dark" else "#F1F5F9"
-card_bg = "rgba(23, 32, 51, 0.65)" if st.session_state.theme == "Dark" else "rgba(255, 255, 255, 0.85)"
-border_color = "rgba(255, 255, 255, 0.08)" if st.session_state.theme == "Dark" else "rgba(0, 0, 0, 0.08)"
+# رابط صورة الخلفية الخاصة بمعدات وأجهزة Roche Diagnostics
+roche_bg_url = "https://images.unsplash.com/photo-1579154204601-01588f351e67?q=80&w=2070&auto=format&fit=crop"
+
+overlay_color = "rgba(10, 13, 20, 0.85)" if st.session_state.theme == "Dark" else "rgba(241, 245, 249, 0.85)"
+card_bg = "rgba(23, 32, 51, 0.75)" if st.session_state.theme == "Dark" else "rgba(255, 255, 255, 0.85)"
+border_color = "rgba(255, 255, 255, 0.12)" if st.session_state.theme == "Dark" else "rgba(0, 0, 0, 0.1)"
 text_color = "#F8FAFC" if st.session_state.theme == "Dark" else "#0F172A"
 
 st.markdown(f"""
 <style>
+    /* خلفية التطبيق بالكامل مع صورة أجهزة روش وضبابية خفيفة */
     .stApp {{
-        background-color: {bg_color};
+        background: linear-gradient({overlay_color}, {overlay_color}), url("{roche_bg_url}");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
         color: {text_color};
     }}
+
+    /* تصميم القائمة الجانبية لتتناسب مع خلفية التطبيق */
+    [data-testid="stSidebar"] {{
+        background: rgba(10, 13, 20, 0.85) !important;
+        backdrop-filter: blur(12px);
+    }}
+
+    /* بطاقات الشفافية والتصميم الزجاجي Glassmorphism */
     .contrast-card {{
         background: {card_bg};
         border: 1px solid {border_color};
-        border-radius: 12px;
-        padding: 18px 24px;
+        border-radius: 16px;
+        padding: 22px 28px;
         margin-bottom: 20px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-        backdrop-filter: blur(10px);
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+    }}
+
+    /* تحسين إطار فقرات المحادثة */
+    [data-testid="stChatMessage"] {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+        padding: 12px 18px !important;
+        margin-bottom: 10px !important;
+        backdrop-filter: blur(8px);
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -125,7 +151,7 @@ st.markdown(f"""
 # 5. Sidebar Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=120)
+    st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=130)
     st.markdown("---")
     st.session_state.api_key = st.text_input("🔑 Gemini API Key", value=st.session_state.api_key, type="password")
     st.markdown("---")
