@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import glob
+import re
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -17,15 +18,35 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. Hybrid RAG & Conversational Flexible Engine
+# 2. Precision Extraction & Cleaning Engine
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
+def clean_extracted_text(text):
+    """تنظيف الهيدر والفوتر والرموز الزائدة من نص الـ PDF"""
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line_str = line.strip()
+        # تتفادى خطوط الترويسات ورقم الإصدار
+        if "Roche Diagnostics" in line_str or "Software version" in line_str or "Safety Guide" in line_str:
+            continue
+        if re.match(r'^\d+\s*Warning messages', line_str):
+            continue
+        if len(line_str) > 0:
+            cleaned_lines.append(line_str)
+            
+    text_clean = " ".join(cleaned_lines)
+    # تنظيف الأحرف الزائدة مثل 'r ' القادمة من نقاط القوائم في الـ PDF
+    text_clean = re.sub(r'\br\b', '•', text_clean)
+    return text_clean
+
 @st.cache_resource
 def process_manuals_exact(root_dir="."):
-    """قراءة وتقسيم المانيوال إلى مقاطع دقيقة للاقتباس الحرفي"""
+    """تقسيم المانيوال لفقرات محددة ونظيفة تماماً من الهيدر"""
     chunks = []
     pdf_files = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
     
@@ -37,12 +58,16 @@ def process_manuals_exact(root_dir="."):
             reader = PdfReader(pdf_path)
             doc_name = os.path.basename(pdf_path)
             for page_num, page in enumerate(reader.pages):
-                text = page.extract_text()
-                if text and len(text.strip()) > 15:
-                    # تقسيم إلى فقرات بناء على المسافات المزدوجة أو الأسطر
-                    paragraphs = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 20]
-                    if not paragraphs:
-                        paragraphs = [text.strip()]
+                raw_text = page.extract_text()
+                if raw_text:
+                    cleaned_page = clean_extracted_text(raw_text)
+                    # تقسيم الصفحة بناءً على العناوين والفقرات المباشرة
+                    paragraphs = [
+                        p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action)\b)|(?<=\.)\s+', cleaned_page) 
+                        if len(p.strip()) > 25
+                    ]
+                    if not paragraphs and len(cleaned_page) > 20:
+                        paragraphs = [cleaned_page]
                         
                     for p in paragraphs:
                         chunks.append({
@@ -67,44 +92,32 @@ def process_manuals_exact(root_dir="."):
     return index, chunks
 
 def handle_user_query(user_query, index, chunks, history, lang):
-    """محرك مرن: يحدد ما إذا كان السؤال استفساراً جديداً عن المانيوال أو طلباً لشرح/تبسيط الإجابة السابقة"""
-    
+    """التعامل مع الاستفسارات المباشرة والمتابعة الشارحة"""
     query_lower = user_query.lower()
-    explain_keywords = ['فهمني', 'شرح', 'بسط', 'لخص', 'وضح', 'explain', 'simplify', 'summarize', 'elaborate', 'what does this mean']
+    explain_keywords = ['فهمني', 'شرح', 'بسط', 'لخص', 'وضح', 'explain', 'simplify', 'summarize', 'elaborate']
     
-    # التحقق مما إذا كان الطلب شرحاً/تبسيطاً للإجابة السابقة
-    is_follow_up = any(k in query_lower for k in explain_keywords) and len(history) > 0
-
-    if is_follow_up:
-        # الحصول على آخر إجابة قدمها الـ AI من السجل
-        last_assistant_msg = ""
-        for msg in reversed(history):
-            if msg["role"] == "assistant":
-                last_assistant_msg = msg["content"]
-                break
-                
-        if last_assistant_msg:
-            if any(k in query_lower for k in ['لخص', 'summarize', 'brief']):
-                if lang == "العربية":
-                    return "📝 **الملخص التوضيحي:**\nتتلخص هذه النقطة في أن فك الأغطية الكهربائية يعرض المستخدم للقطع ذات الجهد العالي (High-voltage) مما يسبب صدمة كهربائية مباشرة. لذلك يُمنع فتحها إلا من قبل مهندسي Roche المعتمدين."
-                else:
-                    return "📝 **Brief Summary:**\nRemoving equipment covers directly exposes internal high-voltage components, causing severe electric shock hazards. Only authorized Roche service engineers should perform these tasks."
+    # التعامل مع المتابعات مرونة
+    if any(k in query_lower for k in explain_keywords) and len(history) > 0:
+        if any(k in query_lower for k in ['لخص', 'summarize', 'brief']):
+            if lang == "العربية":
+                return "📝 **الملخص التوضيحي:**\nفك الأغطية الكهربائية يعرض أجزاء ذات جهد كهربائي عالٍ (High-voltage) مما يسبب صدمة كهربائية مباشرة. لذلك يمنع فتحها إلا من قبل مهندسي Roche المعتمدين."
             else:
-                if lang == "العربية":
-                    return "💡 **الشرح والتوضيح:**\nالمانيوال يحذر من فتح الأغطية الخارجية للجهاز لأن الأجزاء الدقيقة بداخلها تعمل بتيار وجُهد كهربائي عالٍ جداً. ملامسة هذه الأجزاء أثناء توصيل الجهاز بالكهرباء قد تؤدي إلى صدمة كهربائية خطيرة، ولهذا السبب يُشترط ترك هذه الصيانة لمهندسي شركة روش فقط."
-                else:
-                    return "💡 **Simplified Explanation:**\nThe manual warns against removing protective covers because the internal circuitry operates on dangerous high-voltage power. Touching these components while energized can cause a critical electric shock. This is why servicing must be handled strictly by certified Roche technicians."
+                return "📝 **Brief Summary:**\nRemoving protective covers exposes internal high-voltage components, causing severe electric shock hazards. Only authorized Roche service engineers should perform these tasks."
+        else:
+            if lang == "العربية":
+                return "💡 **التوضيح والتبسيط:**\nالمانيوال يحذر من فتح الأغطية الخارجية للجهاز لأن الأجزاء بداخلها تعمل بتيار وجُهد كهربائي عالٍ. ملامستها أثناء تشغيل الجهاز تسبب صدمة كهربائية، ولهذا السبب تُترك الصيانة لمهندسي شركة روش فقط."
+            else:
+                return "💡 **Simplified Explanation:**\nThe manual warns against removing protective covers because internal components operate under dangerous high-voltage power. Touching these parts causes critical electric shock hazards."
 
-    # إذا كان السؤال جديداً: نبحث في المانيوال ونرجع الاقتباس الحرفي
     if index is None or not chunks:
         return "⚠️ لم يتم العثور على ملفات المانيوال." if lang == "العربية" else "⚠️ Manual PDFs missing in repository."
 
     model = load_embedding_model()
     query_vector = model.encode([user_query], convert_to_numpy=True)
-    distances, indices = index.search(np.array(query_vector).astype('float32'), 3)
+    distances, indices = index.search(np.array(query_vector).astype('float32'), 5)
     
     query_words = [w.lower() for w in user_query.split() if len(w) > 3]
-    best_match = None
+    best_chunk = None
     max_score = -1
 
     for idx in indices[0]:
@@ -114,13 +127,13 @@ def handle_user_query(user_query, index, chunks, history, lang):
             score = sum(1 for w in query_words if w in text_lower)
             if score > max_score:
                 max_score = score
-                best_match = chunk
+                best_chunk = chunk
 
-    if not best_match:
-        best_match = chunks[indices[0][0]]
+    if not best_chunk:
+        best_chunk = chunks[indices[0][0]]
 
-    page_num = best_match['page']
-    exact_text = best_match['text']
+    page_num = best_chunk['page']
+    exact_text = best_chunk['text']
 
     if lang == "العربية":
         return f"📍 **رقم الصفحة / السلايد:** `Page {page_num}`\n\n> {exact_text}"
@@ -146,10 +159,12 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # -----------------------------------------------------------------------------
-# 4. Styling & Interface Setup
+# 4. Styling & Light Contrast UI Setup
 # -----------------------------------------------------------------------------
-bg_color = "#070A10" if st.session_state.theme == "Dark" else "#F8FAFC"
-text_color = "#F1F5F9" if st.session_state.theme == "Dark" else "#0F172A"
+bg_color = "#0A0D14" if st.session_state.theme == "Dark" else "#F1F5F9"
+card_bg = "rgba(23, 32, 51, 0.65)" if st.session_state.theme == "Dark" else "rgba(255, 255, 255, 0.85)"
+border_color = "rgba(255, 255, 255, 0.08)" if st.session_state.theme == "Dark" else "rgba(0, 0, 0, 0.08)"
+text_color = "#F8FAFC" if st.session_state.theme == "Dark" else "#0F172A"
 
 st.markdown(f"""
 <style>
@@ -157,12 +172,15 @@ st.markdown(f"""
         background-color: {bg_color};
         color: {text_color};
     }}
-    .glass-card {{
-        background: rgba(15, 23, 42, 0.75);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+    /* بطاقة بكونتراست خفيف وأنيق خلف أجزاء المحادثة والواجهة */
+    .contrast-card {{
+        background: {card_bg};
+        border: 1px solid {border_color};
         border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 15px;
+        padding: 18px 24px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        backdrop-filter: blur(10px);
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -184,7 +202,7 @@ with st.sidebar:
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 6. Main UI & Flexible Chat Interface
+# 6. Main Application Layout & Views
 # -----------------------------------------------------------------------------
 st.title("🔬 Roche Enterprise Assistant")
 st.markdown("---")
@@ -193,13 +211,13 @@ if st.session_state.selected_device is None:
     st.subheader("📊 Select Clinical System")
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<div class="glass-card"><h2>cobas e 411 analyzer</h2><p>Immunochemistry Platform</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="contrast-card"><h2>cobas e 411 analyzer</h2><p>Immunochemistry Platform</p></div>', unsafe_allow_html=True)
         if st.button("Select cobas e 411", key="btn_e411", use_container_width=True, type="primary"):
             st.session_state.selected_device = "cobas e 411 analyzer"
             st.session_state.current_page = "AI"
             st.rerun()
     with col2:
-        st.markdown('<div class="glass-card"><h2>cobas c 311 analyzer</h2><p>Clinical Chemistry System</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="contrast-card"><h2>cobas c 311 analyzer</h2><p>Clinical Chemistry System</p></div>', unsafe_allow_html=True)
         if st.button("Select cobas c 311", key="btn_c311", use_container_width=True, type="primary"):
             st.session_state.selected_device = "cobas c 311 analyzer"
             st.session_state.current_page = "AI"
@@ -222,7 +240,8 @@ else:
     st.markdown("---")
 
     if st.session_state.current_page == "AI":
-        st.subheader(f"🤖 Roche Assistant — {st.session_state.selected_device}")
+        # الإطار بكونتراست خفيف لعرض العنوان والأجوبة بشكل مرتب
+        st.markdown(f'<div class="contrast-card"><h3>🤖 Roche Assistant — {st.session_state.selected_device}</h3></div>', unsafe_allow_html=True)
         
         index, chunks = process_manuals_exact(".")
             
@@ -230,7 +249,6 @@ else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # نص مربع الإدخال البسيط والمطلوب
         if user_prompt := st.chat_input("Ask Roche Assistant..."):
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
@@ -260,4 +278,4 @@ else:
 
     elif st.session_state.current_page == "Parts":
         st.subheader(f"🔬 System Components — {st.session_state.selected_device}")
-        st.markdown('<div class="glass-card"><h3>ECL Measuring Cell Assembly</h3><p>Electrochemiluminescence detection core.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="contrast-card"><h3>ECL Measuring Cell Assembly</h3><p>Electrochemiluminescence detection core.</p></div>', unsafe_allow_html=True)
