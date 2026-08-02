@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import glob
 import re
-import fitz  # PyMuPDF لعرض صفحات PDF كصور عالية الدقة بكل تفاصيلها والصور
+import fitz  # PyMuPDF لعرض صفحات PDF كصور عالية الدقة بكل تفاصيلها
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -313,38 +313,52 @@ else:
             doc = fitz.open(pdf_path)
             total_pages = len(doc)
             
-            col_input, col_info = st.columns([1, 3])
+            # التأكد من صحة رقم الصفحة الحالي
+            if st.session_state.last_page is None or st.session_state.last_page < 1:
+                st.session_state.last_page = 1
+            elif st.session_state.last_page > total_pages:
+                st.session_state.last_page = total_pages
+
+            # شريط التحكم والأزرار للتنقل السلس
+            col_prev, col_num, col_next, col_info = st.columns([1.5, 2, 1.5, 3])
             
-            with col_input:
-                # ادخال رقم السلايد/الصفحة كتابةً مباشرة
-                page_input = st.text_input(
-                    f"✏️ اكتب رقم السلايد/الصفحة (1 - {total_pages}):", 
-                    value=str(st.session_state.last_page) if st.session_state.last_page else "1"
+            with col_prev:
+                if st.button("⬅️ السابق (Previous)", use_container_width=True):
+                    if st.session_state.last_page > 1:
+                        st.session_state.last_page -= 1
+                        st.rerun()
+                        
+            with col_num:
+                page_input = st.number_input(
+                    f"رقم السلايد (1 - {total_pages})", 
+                    min_value=1, 
+                    max_value=total_pages, 
+                    value=int(st.session_state.last_page),
+                    step=1,
+                    key="manual_page_selector"
                 )
-            
-            # التحقق والتأكد من إدخال رقم صحيح
-            try:
-                target_page = int(page_input)
-                if target_page < 1:
-                    target_page = 1
-                elif target_page > total_pages:
-                    target_page = total_pages
-            except ValueError:
-                target_page = 1
-                
-            st.session_state.last_page = target_page
+                if page_input != st.session_state.last_page:
+                    st.session_state.last_page = int(page_input)
+                    st.rerun()
+
+            with col_next:
+                if st.button("التالي (Next) ➡️", use_container_width=True):
+                    if st.session_state.last_page < total_pages:
+                        st.session_state.last_page += 1
+                        st.rerun()
 
             with col_info:
-                st.markdown(f"#### 📄 السلايد المعروضة: **{target_page} من أصل {total_pages}**")
+                st.markdown(f"#### 📄 السلايد المعروضة: **{st.session_state.last_page} من أصل {total_pages}**")
 
             st.markdown("---")
             
-            # رندر الصفحة المطلوبة كصورة عالية الجودة (300 DPI)
+            # رندر الصفحة المطلوبة كصورة عالية الجودة
+            target_page = int(st.session_state.last_page)
             page = doc.load_page(target_page - 1)
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("png")
             
-            # عرض الصورة الكاملة للسلايد مع الصور والتنسيقات الأصلية
+            # عرض الصورة الكاملة للسلايد
             st.image(img_bytes, caption=f"Slide / Page {target_page}", use_column_width=True)
             doc.close()
         else:
