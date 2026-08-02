@@ -1,7 +1,8 @@
 streamlit
 pypdf
+faiss-cpu
+sentence-transformers
+google-genai
 langchain
 langchain-community
-sentence-transformers
-faiss-cpu
 streamlit-option-menu
