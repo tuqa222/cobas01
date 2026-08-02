@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import glob
 import re
+import fitz  # PyMuPDF لعرض صفحات PDF كصور عالية الدقة بكل تفاصيلها والصور
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -171,7 +172,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "last_page" not in st.session_state:
-    st.session_state.last_page = None
+    st.session_state.last_page = 1
 
 # -----------------------------------------------------------------------------
 # 4. Background Image & Styling
@@ -235,7 +236,7 @@ with st.sidebar:
         if st.button("← Switch System", use_container_width=True):
             st.session_state.selected_device = None
             st.session_state.current_page = "Home"
-            st.session_state.last_page = None
+            st.session_state.last_page = 1
             st.rerun()
 
 # -----------------------------------------------------------------------------
@@ -302,31 +303,50 @@ else:
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
     elif st.session_state.current_page == "Manual":
-        st.subheader(f"📖 Technical Documentation — {st.session_state.selected_device}")
+        st.subheader(f"📖 Technical Documentation Visual Viewer — {st.session_state.selected_device}")
         
         pdf_files = glob.glob("*.pdf") + glob.glob("*.pdf.pdf")
         if pdf_files:
             pdf_path = pdf_files[0]
-            reader = PdfReader(pdf_path)
-            total_pages = len(reader.pages)
             
-            # عارض مانيوال تفاعلي بدون اعتمادات خارجية أو حظر من متصفح Chrome
-            selected_page = st.number_input(
-                f"📖 Jump to Page (1 - {total_pages})", 
-                min_value=1, 
-                max_value=total_pages, 
-                value=st.session_state.last_page if st.session_state.last_page else 1
-            )
+            # فتح الـ PDF باستخدام PyMuPDF
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
             
-            raw_page_text = reader.pages[selected_page - 1].extract_text()
+            col_input, col_info = st.columns([1, 3])
             
-            st.markdown(f"""
-            <div class="contrast-card">
-                <h4>📄 Document: {os.path.basename(pdf_path)} — Page {selected_page} / {total_pages}</h4>
-                <hr style="border: 0.5px solid rgba(255,255,255,0.1); margin: 15px 0;">
-                <p style="white-space: pre-wrap; font-family: monospace; line-height: 1.6;">{raw_page_text if raw_page_text else "Page content is empty or contains non-text elements."}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            with col_input:
+                # ادخال رقم السلايد/الصفحة كتابةً مباشرة
+                page_input = st.text_input(
+                    f"✏️ اكتب رقم السلايد/الصفحة (1 - {total_pages}):", 
+                    value=str(st.session_state.last_page) if st.session_state.last_page else "1"
+                )
+            
+            # التحقق والتأكد من إدخال رقم صحيح
+            try:
+                target_page = int(page_input)
+                if target_page < 1:
+                    target_page = 1
+                elif target_page > total_pages:
+                    target_page = total_pages
+            except ValueError:
+                target_page = 1
+                
+            st.session_state.last_page = target_page
+
+            with col_info:
+                st.markdown(f"#### 📄 السلايد المعروضة: **{target_page} من أصل {total_pages}**")
+
+            st.markdown("---")
+            
+            # رندر الصفحة المطلوبة كصورة عالية الجودة (300 DPI)
+            page = doc.load_page(target_page - 1)
+            pix = page.get_pixmap(dpi=150)
+            img_bytes = pix.tobytes("png")
+            
+            # عرض الصورة الكاملة للسلايد مع الصور والتنسيقات الأصلية
+            st.image(img_bytes, caption=f"Slide / Page {target_page}", use_column_width=True)
+            doc.close()
         else:
             st.info("💡 PDF Manual file is missing in root repository.")
 
