@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import glob
 import re
-import base64
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -305,16 +304,29 @@ else:
     elif st.session_state.current_page == "Manual":
         st.subheader(f"📖 Technical Documentation — {st.session_state.selected_device}")
         
-        # البحث عن ملف المانيوال وعرضه بداخل قارئ مدمج
         pdf_files = glob.glob("*.pdf") + glob.glob("*.pdf.pdf")
         if pdf_files:
             pdf_path = pdf_files[0]
-            with open(pdf_path, "rb") as f:
-                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            reader = PdfReader(pdf_path)
+            total_pages = len(reader.pages)
             
-            # عرض ملف PDF تفاعلياً داخل التطبيق مباشرة عبر PDF Viewer
-            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf" style="border-radius:12px; border:1px solid {border_color};"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
+            # عارض مانيوال تفاعلي بدون اعتمادات خارجية أو حظر من متصفح Chrome
+            selected_page = st.number_input(
+                f"📖 Jump to Page (1 - {total_pages})", 
+                min_value=1, 
+                max_value=total_pages, 
+                value=st.session_state.last_page if st.session_state.last_page else 1
+            )
+            
+            raw_page_text = reader.pages[selected_page - 1].extract_text()
+            
+            st.markdown(f"""
+            <div class="contrast-card">
+                <h4>📄 Document: {os.path.basename(pdf_path)} — Page {selected_page} / {total_pages}</h4>
+                <hr style="border: 0.5px solid rgba(255,255,255,0.1); margin: 15px 0;">
+                <p style="white-space: pre-wrap; font-family: monospace; line-height: 1.6;">{raw_page_text if raw_page_text else "Page content is empty or contains non-text elements."}</p>
+            </div>
+            """, unsafe_allow_html=True)
         else:
             st.info("💡 PDF Manual file is missing in root repository.")
 
