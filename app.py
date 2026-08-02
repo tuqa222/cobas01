@@ -326,45 +326,22 @@ else:
         pdf_path = get_device_pdf(st.session_state.selected_device, ".")
         
         if pdf_path and os.path.exists(pdf_path):
-            # فتح الـ PDF المخصص للجهاز المختار بـ PyMuPDF
             doc = fitz.open(pdf_path)
             total_pages = len(doc)
             
-            # التأكد من صحة رقم الصفحة الحالي
-            if st.session_state.last_page is None or st.session_state.last_page < 1:
-                st.session_state.last_page = 1
-            elif st.session_state.last_page > total_pages:
-                st.session_state.last_page = total_pages
-
-            # إدخال رقم السلايد مباشرة عبر صندوق إدخال بسيط بدون أزرار تنقل
-            col_num, col_info = st.columns([1, 2])
-            
-            with col_num:
-                page_input = st.number_input(
-                    f"✏️ اكتب رقم السلايد (1 - {total_pages}):", 
-                    min_value=1, 
-                    max_value=total_pages, 
-                    value=int(st.session_state.last_page),
-                    step=1,
-                    key="manual_page_selector"
-                )
-                if page_input != st.session_state.last_page:
-                    st.session_state.last_page = int(page_input)
-                    st.rerun()
-
-            with col_info:
-                st.markdown(f"#### 📄 الملف: `{os.path.basename(pdf_path)}` — **السلايد {st.session_state.last_page} من أصل {total_pages}**")
-
+            st.markdown(f"#### 📄 الملف: `{os.path.basename(pdf_path)}` — **إجمالي الصفحات: {total_pages}**")
+            st.caption("📜 يمكنك التمرير لأسفل لقرائة كافة صفحات المانيوال بشكل متتالي.")
             st.markdown("---")
             
-            # رندر الصفحة المطلوبة كصورة عالية الجودة
-            target_page = int(st.session_state.last_page)
-            page = doc.load_page(target_page - 1)
-            pix = page.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("png")
-            
-            # عرض الصورة الكاملة للسلايد
-            st.image(img_bytes, caption=f"Slide / Page {target_page}", use_column_width=True)
+            # عرض كافة الصفحات كصور متتالية أسفل بعضها
+            for page_num in range(total_pages):
+                page = doc.load_page(page_num)
+                pix = page.get_pixmap(dpi=150)
+                img_bytes = pix.tobytes("png")
+                
+                st.image(img_bytes, caption=f"Slide / Page {page_num + 1} of {total_pages}", use_column_width=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                
             doc.close()
         else:
             st.info(f"💡 Manual PDF for {st.session_state.selected_device} is missing in root repository.")
