@@ -2,11 +2,12 @@ import streamlit as st
 import os
 import glob
 import re
-import fitz  # PyMuPDF لعرض صفحات PDF كصور عالية الدقة بكل تفاصيلها
+import fitz  # PyMuPDF لعرض صفحات PDF
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
+import google.generativeai as genai
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration
@@ -19,7 +20,7 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. Precision Extraction & Cleaning Engine
+# 2. Precision Extraction & Embedding Engine
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_embedding_model():
@@ -48,15 +49,12 @@ def get_device_pdf(device_name, root_dir="."):
     if not all_pdfs:
         return None
     
-    # تحديد الكلمة المفتاحية بناءً على الجهاز
     keyword = "e411" if "e 411" in device_name.lower() or "e411" in device_name.lower() else "c311"
     
-    # البحث عن ملف يحتوي اسم الجهاز
     for pdf in all_pdfs:
         if keyword in os.path.basename(pdf).lower():
             return pdf
             
-    # في حال لم يتم العثور على اسم مطابق تماماً، يتم ارجاع أول ملف كخيار افتراضي
     return all_pdfs[0]
 
 @st.cache_resource
@@ -75,7 +73,7 @@ def process_manuals_exact(device_name, root_dir="."):
             if raw_text:
                 cleaned_page = clean_extracted_text(raw_text)
                 paragraphs = [
-                    p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action)\b)|(?<=\.)\s+', cleaned_page) 
+                    p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action|Troubleshooting|Error|Warning|Maintenance)\b)|(?<=\.)\s+', cleaned_page) 
                     if len(p.strip()) > 25
                 ]
                 if not paragraphs and len(cleaned_page) > 20:
@@ -103,77 +101,70 @@ def process_manuals_exact(device_name, root_dir="."):
     
     return index, chunks
 
-def handle_user_query(user_query, index, chunks, history, lang):
-    query_lower = user_query.lower().strip()
-    
-    explain_keywords = ['فهمني', 'شرح', 'بسط', 'لخص', 'وضح', 'explain', 'simplify', 'summarize', 'elaborate']
-    next_keywords = ['what is next', 'next', 'tell me the next', 'التالي', 'ما التالي', 'القسم التالي', 'كمل', 'الصفحة التالية', 'تابع']
-    
-    # 1. حالة طلب الصفحة القادمة بالتتابع
-    is_next = any(k in query_lower for k in next_keywords)
-    if is_next and "last_page" in st.session_state and st.session_state.last_page is not None:
-        next_target_page = st.session_state.last_page + 1
-        next_chunks = [c for c in chunks if c['page'] == next_target_page]
+# -----------------------------------------------------------------------------
+# 3. Hybrid AI Query Handler (RAG + Gemini General Knowledge)
+# -----------------------------------------------------------------------------
+def handle_user_query(user_query, index, chunks, device_name, api_key, lang):
+    manual_context = ""
+    top_page = None
+
+    # 1. استخراج سياق المانيوال ذو الصلة إن وجد
+    if index is not None and chunks:
+        model = load_embedding_model()
+        query_vector = model.encode([user_query], convert_to_numpy=True)
+        distances, indices = index.search(np.array(query_vector).astype('float32'), 3)
         
-        if next_chunks:
-            st.session_state.last_page = next_target_page
-            next_text = "\n\n".join([c['text'] for c in next_chunks])
-            if lang == "العربية":
-                return f"📍 **القسم التالي - رقم الصفحة / السلايد:** `Page {next_target_page}`\n\n> {next_text}"
-            else:
-                return f"📍 **Next Section / Page Reference:** `Page {next_target_page}`\n\n> {next_text}"
+        matched_chunks = [chunks[idx] for idx in indices[0] if idx < len(chunks)]
+        if matched_chunks:
+            top_page = matched_chunks[0]['page']
+            st.session_state.last_page = top_page
+            manual_context = "\n".join([f"- (الصفحة/السلايد {c['page']}): {c['text']}" for c in matched_chunks])
 
-    # 2. حالة طلب الشرح والتبسيط للفقرة السابقة
-    if any(k in query_lower for k in explain_keywords) and len(history) > 0:
-        if any(k in query_lower for k in ['لخص', 'summarize', 'brief']):
-            if lang == "العربية":
-                return "📝 **الملخص التوضيحي:**\nفك الأغطية الكهربائية يعرض أجزاء ذات جهد كهربائي عالٍ (High-voltage) مما يسبب صدمة كهربائية مباشرة. لذلك يمنع فتحها إلا من قبل مهندسي Roche المعتمدين."
-            else:
-                return "📝 **Brief Summary:**\nRemoving protective covers exposes internal high-voltage components, causing severe electric shock hazards. Only authorized Roche service engineers should perform these tasks."
+    # 2. في حال عدم إدخال الـ API Key، إرجاع السياق المباشر فقط
+    if not api_key:
+        if lang == "العربية":
+            return (
+                f"⚠️ **ملاحظة:** يرجى إدخال مفتاح Gemini API Key من القائمة الجانبية للحصول على إجابة ذكية وشاملة.\n\n"
+                f"**المعلومات المتوفرة في مانيوال الجهاز:**\n{manual_context if manual_context else 'لم يتم العثور على نص مطليق في المانيوال.'}"
+            )
         else:
-            if lang == "العربية":
-                return "💡 **التوضيح والتبسيط:**\nالمانيوال يحذر من فتح الأغطية الخارجية للجهاز لأن الأجزاء بداخلها تعمل بتيار وجُهد كهربائي عالٍ. ملامستها أثناء تشغيل الجهاز تسبب صدمة كهربائية، ولهذا السبب تُترك الصيانة لمهندسي شركة روش فقط."
-            else:
-                return "💡 **Simplified Explanation:**\nThe manual warns against removing protective covers because internal components operate under dangerous high-voltage power. Touching these parts causes critical electric shock hazards."
+            return (
+                f"⚠️ **Notice:** Please enter your Gemini API Key in the sidebar for full AI capabilities.\n\n"
+                f"**Manual Context:**\n{manual_context if manual_context else 'No direct manual context found.'}"
+            )
 
-    # 3. البحث المباشر في المانيوال
-    if index is None or not chunks:
-        return "⚠️ لم يتم العثور على ملفات المانيوال الخاصة بهذا الجهاز." if lang == "العربية" else "⚠️ Device manual PDF is missing."
+    # 3. استدعاء نموذج Gemini لصياغة إجابة شاملة ودقيقة
+    try:
+        genai.configure(api_key=api_key)
+        model_gemini = genai.GenerativeModel('gemini-1.5-flash')
 
-    model = load_embedding_model()
-    query_vector = model.encode([user_query], convert_to_numpy=True)
-    distances, indices = index.search(np.array(query_vector).astype('float32'), 5)
-    
-    query_words = [w.lower() for w in user_query.split() if len(w) > 3]
-    best_chunk = None
-    max_score = -1
+        prompt = f"""
+أنت مهندس صيانة خبير ومستشار فني متخصص في أجهزة Roche الطبية المخبرية، وتحديداً جهاز ({device_name}).
 
-    for idx in indices[0]:
-        if idx < len(chunks):
-            chunk = chunks[idx]
-            text_lower = chunk['text'].lower()
-            score = sum(1 for w in query_words if w in text_lower)
-            if score > max_score:
-                max_score = score
-                best_chunk = chunk
+السؤال أو المشكلة المرفوعة من المستخدم:
+"{user_query}"
 
-    if not best_chunk:
-        best_chunk = chunks[indices[0][0]]
+المعلومات المقتطعة من دليل التشغيل والمانيوال الخاص بالجهاز (إن وجدت):
+{manual_context if manual_context else "لا توجد نصوص مباشرة مطابقة في المانيوال المحلي."}
 
-    st.session_state.last_page = best_chunk['page']
-    page_num = best_chunk['page']
-    exact_text = best_chunk['text']
+المطلوب منك:
+1. الإجابة بدقة وشمولية باللغة ({lang}).
+2. تقديم تشخيص هندسي وخطوات عملية واضحة ومبسطة (Step-by-step) لحل المشكلة أو شرح الاستفسار.
+3. دمج معلومات المانيوال الواردة أعلاه مع خبرتك والمعرفة الطبية/الهندسية العامة لأجهزة Roche لإكمال أي نقص.
+4. الإشارة إلى رقم الصفحة/السلايد مرجعياً إذا كانت المعلومات مذكورة في المانيوال.
+        """
 
-    if lang == "العربية":
-        return f"📍 **رقم الصفحة / السلايد:** `Page {page_num}`\n\n> {exact_text}"
-    else:
-        return f"📍 **Slide / Page Reference:** `Page {page_num}`\n\n> {exact_text}"
+        response = model_gemini.generate_content(prompt)
+        return response.text
+
+    except Exception as e:
+        return f"❌ حدث خطأ أثناء الاتصال بنموذج الذكاء الاصطناعي: {str(e)}"
 
 # -----------------------------------------------------------------------------
-# 3. State Initialization
+# 4. State Initialization
 # -----------------------------------------------------------------------------
 if "lang" not in st.session_state:
-    st.session_state.lang = "English"
+    st.session_state.lang = "العربية"
 
 if "theme" not in st.session_state:
     st.session_state.theme = "Dark"
@@ -190,8 +181,11 @@ if "messages" not in st.session_state:
 if "last_page" not in st.session_state:
     st.session_state.last_page = 1
 
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+
 # -----------------------------------------------------------------------------
-# 4. Background Image & Styling
+# 5. Styling
 # -----------------------------------------------------------------------------
 roche_bg_url = "https://images.unsplash.com/photo-1579154204601-01588f351e67?q=80&w=2070&auto=format&fit=crop"
 
@@ -239,13 +233,17 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. Sidebar Controls
+# 6. Sidebar Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=130)
     st.markdown("---")
     st.session_state.theme = st.selectbox("Theme / المظهر", ["Dark", "Light"])
-    st.session_state.lang = st.selectbox("Language / اللغة", ["English", "العربية"])
+    st.session_state.lang = st.selectbox("Language / اللغة", ["العربية", "English"])
+    
+    st.markdown("---")
+    st.session_state.api_key = st.text_input("🔑 Gemini API Key", value=st.session_state.api_key, type="password", help="أدخلي المفتاح لتفعيل الذكاء الاصطناعي الشامل")
+    
     st.markdown("---")
     if st.session_state.selected_device:
         st.success(f"Active System:\n**{st.session_state.selected_device}**")
@@ -253,10 +251,11 @@ with st.sidebar:
             st.session_state.selected_device = None
             st.session_state.current_page = "Home"
             st.session_state.last_page = 1
+            st.session_state.messages = []
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 6. Main Application Views
+# 7. Main Application Views
 # -----------------------------------------------------------------------------
 st.title("🔬 Roche Enterprise Assistant")
 st.markdown("---")
@@ -296,7 +295,7 @@ else:
     st.markdown("---")
 
     if st.session_state.current_page == "AI":
-        st.markdown(f'<div class="contrast-card"><h3>🤖 Roche Assistant — {st.session_state.selected_device}</h3></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="contrast-card"><h3>🤖 Roche Assistant — {st.session_state.selected_device}</h3><p>اسألي عن أي عطل، كود خطأ، أو استفسار تقني وسيجيبك الذكاء الاصطناعي بشكل شامل.</p></div>', unsafe_allow_html=True)
         
         index, chunks = process_manuals_exact(st.session_state.selected_device, ".")
             
@@ -304,7 +303,7 @@ else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        if user_prompt := st.chat_input("Ask Roche Assistant..."):
+        if user_prompt := st.chat_input("اكتبي سؤالك أو توضيح المشكلة هنا..."):
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
@@ -314,7 +313,8 @@ else:
                     user_prompt, 
                     index, 
                     chunks, 
-                    st.session_state.messages[:-1], 
+                    st.session_state.selected_device,
+                    st.session_state.api_key,
                     st.session_state.lang
                 )
                 st.markdown(response)
@@ -330,10 +330,9 @@ else:
             total_pages = len(doc)
             
             st.markdown(f"#### 📄 الملف: `{os.path.basename(pdf_path)}` — **إجمالي الصفحات: {total_pages}**")
-            st.caption("📜 يمكنك التمرير لأسفل لقرائة كافة صفحات المانيوال بشكل متتالي.")
+            st.caption("📜 يمكنك التمرير لأسفل لقراءة كافة صفحات المانيوال بشكل متتالي.")
             st.markdown("---")
             
-            # عرض كافة الصفحات كصور متتالية أسفل بعضها
             for page_num in range(total_pages):
                 page = doc.load_page(page_num)
                 pix = page.get_pixmap(dpi=150)
