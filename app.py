@@ -3,9 +3,7 @@ import os
 import glob
 import re
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+import google.generativeai as genai
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration
@@ -18,127 +16,63 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. Precision Extraction & Cleaning Engine
+# 2. PDF Processing & Context Loading
 # -----------------------------------------------------------------------------
 @st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-def clean_extracted_text(text):
-    """تنظيف الهيدر والفوتر والرموز الزائدة من نص الـ PDF"""
-    lines = text.split('\n')
-    cleaned_lines = []
-    
-    for line in lines:
-        line_str = line.strip()
-        # تتفادى خطوط الترويسات ورقم الإصدار
-        if "Roche Diagnostics" in line_str or "Software version" in line_str or "Safety Guide" in line_str:
-            continue
-        if re.match(r'^\d+\s*Warning messages', line_str):
-            continue
-        if len(line_str) > 0:
-            cleaned_lines.append(line_str)
-            
-    text_clean = " ".join(cleaned_lines)
-    # تنظيف الأحرف الزائدة مثل 'r ' القادمة من نقاط القوائم في الـ PDF
-    text_clean = re.sub(r'\br\b', '•', text_clean)
-    return text_clean
-
-@st.cache_resource
-def process_manuals_exact(root_dir="."):
-    """تقسيم المانيوال لفقرات محددة ونظيفة تماماً من الهيدر"""
-    chunks = []
+def load_full_manual_text(root_dir="."):
+    """قراءة وحفظ المانيوال مقسماً حسب الصفحات لاستخدامه مع الذكاء الاصطناعي"""
     pdf_files = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
-    
     if not pdf_files:
-        return None, []
+        return ""
 
+    full_content = []
     for pdf_path in pdf_files:
         try:
             reader = PdfReader(pdf_path)
             doc_name = os.path.basename(pdf_path)
             for page_num, page in enumerate(reader.pages):
-                raw_text = page.extract_text()
-                if raw_text:
-                    cleaned_page = clean_extracted_text(raw_text)
-                    # تقسيم الصفحة بناءً على العناوين والفقرات المباشرة
-                    paragraphs = [
-                        p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action)\b)|(?<=\.)\s+', cleaned_page) 
-                        if len(p.strip()) > 25
-                    ]
-                    if not paragraphs and len(cleaned_page) > 20:
-                        paragraphs = [cleaned_page]
-                        
-                    for p in paragraphs:
-                        chunks.append({
-                            "text": p,
-                            "source": doc_name,
-                            "page": page_num + 1
-                        })
+                text = page.extract_text()
+                if text and len(text.strip()) > 10:
+                    full_content.append(f"--- [Document: {doc_name} | Page {page_num + 1}] ---\n{text.strip()}")
         except Exception:
             pass
 
-    if not chunks:
-        return None, []
+    return "\n\n".join(full_content)
 
-    model = load_embedding_model()
-    texts = [c["text"] for c in chunks]
-    embeddings = model.encode(texts, convert_to_numpy=True)
-    
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings).astype('float32'))
-    
-    return index, chunks
+def get_flexible_ai_response(user_prompt, chat_history, manual_context, api_key):
+    """إرسال المحادثة والسياق بالكامل إلى Gemini API للإجابة بمرونة وفهم عميق"""
+    if not api_key:
+        return "⚠️ الرجاء إدخال مفتاح Gemini API في الشريط الجانبي لتفعيل الذكاء الاصطناعي المرن."
 
-def handle_user_query(user_query, index, chunks, history, lang):
-    """التعامل مع الاستفسارات المباشرة والمتابعة الشارحة"""
-    query_lower = user_query.lower()
-    explain_keywords = ['فهمني', 'شرح', 'بسط', 'لخص', 'وضح', 'explain', 'simplify', 'summarize', 'elaborate']
-    
-    # التعامل مع المتابعات مرونة
-    if any(k in query_lower for k in explain_keywords) and len(history) > 0:
-        if any(k in query_lower for k in ['لخص', 'summarize', 'brief']):
-            if lang == "العربية":
-                return "📝 **الملخص التوضيحي:**\nفك الأغطية الكهربائية يعرض أجزاء ذات جهد كهربائي عالٍ (High-voltage) مما يسبب صدمة كهربائية مباشرة. لذلك يمنع فتحها إلا من قبل مهندسي Roche المعتمدين."
-            else:
-                return "📝 **Brief Summary:**\nRemoving protective covers exposes internal high-voltage components, causing severe electric shock hazards. Only authorized Roche service engineers should perform these tasks."
-        else:
-            if lang == "العربية":
-                return "💡 **التوضيح والتبسيط:**\nالمانيوال يحذر من فتح الأغطية الخارجية للجهاز لأن الأجزاء بداخلها تعمل بتيار وجُهد كهربائي عالٍ. ملامستها أثناء تشغيل الجهاز تسبب صدمة كهربائية، ولهذا السبب تُترك الصيانة لمهندسي شركة روش فقط."
-            else:
-                return "💡 **Simplified Explanation:**\nThe manual warns against removing protective covers because internal components operate under dangerous high-voltage power. Touching these parts causes critical electric shock hazards."
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-    if index is None or not chunks:
-        return "⚠️ لم يتم العثور على ملفات المانيوال." if lang == "العربية" else "⚠️ Manual PDFs missing in repository."
+        system_instruction = f"""
+أنت مساعد ذكي متخصص لشركة Roche Diagnostics ومعدات cobas.
+أمامك دليل الاستخدام/المانيوال التالي المكون من عدة صفحات:
 
-    model = load_embedding_model()
-    query_vector = model.encode([user_query], convert_to_numpy=True)
-    distances, indices = index.search(np.array(query_vector).astype('float32'), 5)
-    
-    query_words = [w.lower() for w in user_query.split() if len(w) > 3]
-    best_chunk = None
-    max_score = -1
+{manual_context[:50000]}  # استخدام نص المانيوال المتاح
 
-    for idx in indices[0]:
-        if idx < len(chunks):
-            chunk = chunks[idx]
-            text_lower = chunk['text'].lower()
-            score = sum(1 for w in query_words if w in text_lower)
-            if score > max_score:
-                max_score = score
-                best_chunk = chunk
+تعليمات التعامل مع المستخدم:
+1. إذا طلب المستخدم معلومات من المانيوال: اذكر رقم الصفحة (Page Number) بدقة، واقتبس المقطع الحرفي أو الإجابة المباشرة.
+2. إذا كان السؤال متابعة (مثل: "فهمني"، "لخص"، "ما التالي"، "what is next"، "بسطلي إياها"): افهم سياق المحادثة السابقة وأجب بمرونة وذكاء كامل دون التزام قسري بالاقتباس الحرفي إذا كان المطلوب الشرح.
+3. كن مرناً، طبيعياً، ودقيقاً في جميع إجاباتك.
+"""
 
-    if not best_chunk:
-        best_chunk = chunks[indices[0][0]]
+        # بناء سجل المحادثة
+        formatted_history = []
+        for msg in chat_history:
+            role = "user" if msg["role"] == "user" else "model"
+            formatted_history.append({"role": role, "parts": [msg["content"]]})
 
-    page_num = best_chunk['page']
-    exact_text = best_chunk['text']
+        chat = model.start_chat(history=formatted_history)
+        prompt_with_instructions = f"{system_instruction}\n\nUser Question: {user_prompt}"
+        response = chat.send_message(prompt_with_instructions)
+        return response.text
 
-    if lang == "العربية":
-        return f"📍 **رقم الصفحة / السلايد:** `Page {page_num}`\n\n> {exact_text}"
-    else:
-        return f"📍 **Slide / Page Reference:** `Page {page_num}`\n\n> {exact_text}"
+    except Exception as e:
+        return f"❌ حدث خطأ أثناء الاتصال بالذكاء الاصطناعي: {str(e)}"
 
 # -----------------------------------------------------------------------------
 # 3. State Initialization
@@ -158,6 +92,9 @@ if "current_page" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+
 # -----------------------------------------------------------------------------
 # 4. Styling & Light Contrast UI Setup
 # -----------------------------------------------------------------------------
@@ -172,7 +109,6 @@ st.markdown(f"""
         background-color: {bg_color};
         color: {text_color};
     }}
-    /* بطاقة بكونتراست خفيف وأنيق خلف أجزاء المحادثة والواجهة */
     .contrast-card {{
         background: {card_bg};
         border: 1px solid {border_color};
@@ -191,6 +127,8 @@ st.markdown(f"""
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/f/f5/Roche_Logo.svg", width=120)
     st.markdown("---")
+    st.session_state.api_key = st.text_input("🔑 Gemini API Key", value=st.session_state.api_key, type="password")
+    st.markdown("---")
     st.session_state.theme = st.selectbox("Theme / المظهر", ["Dark", "Light"])
     st.session_state.lang = st.selectbox("Language / اللغة", ["English", "العربية"])
     st.markdown("---")
@@ -202,10 +140,12 @@ with st.sidebar:
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 6. Main Application Layout & Views
+# 6. Main Application Views
 # -----------------------------------------------------------------------------
 st.title("🔬 Roche Enterprise Assistant")
 st.markdown("---")
+
+manual_text = load_full_manual_text(".")
 
 if st.session_state.selected_device is None:
     st.subheader("📊 Select Clinical System")
@@ -240,11 +180,8 @@ else:
     st.markdown("---")
 
     if st.session_state.current_page == "AI":
-        # الإطار بكونتراست خفيف لعرض العنوان والأجوبة بشكل مرتب
-        st.markdown(f'<div class="contrast-card"><h3>🤖 Roche Assistant — {st.session_state.selected_device}</h3></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="contrast-card"><h3>🤖 Flexible Assistant — {st.session_state.selected_device}</h3></div>', unsafe_allow_html=True)
         
-        index, chunks = process_manuals_exact(".")
-            
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -255,15 +192,15 @@ else:
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                response = handle_user_query(
-                    user_prompt, 
-                    index, 
-                    chunks, 
-                    st.session_state.messages[:-1], 
-                    st.session_state.lang
-                )
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                with st.spinner("Thinking..."):
+                    response = get_flexible_ai_response(
+                        user_prompt,
+                        st.session_state.messages[:-1],
+                        manual_text,
+                        st.session_state.api_key
+                    )
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
 
     elif st.session_state.current_page == "Manual":
         st.subheader(f"📖 Technical Documentation — {st.session_state.selected_device}")
