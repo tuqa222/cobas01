@@ -42,37 +42,53 @@ def clean_extracted_text(text):
     text_clean = re.sub(r'\br\b', '•', text_clean)
     return text_clean
 
-@st.cache_resource
-def process_manuals_exact(root_dir="."):
-    chunks = []
-    pdf_files = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
+def get_device_pdf(device_name, root_dir="."):
+    """جلب ملف الـ PDF الخاص بالجهاز المحدد فقط"""
+    all_pdfs = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
+    if not all_pdfs:
+        return None
     
-    if not pdf_files:
+    # تحديد الكلمة المفتاحية بناءً على الجهاز
+    keyword = "e411" if "e 411" in device_name.lower() or "e411" in device_name.lower() else "c311"
+    
+    # البحث عن ملف يحتوي اسم الجهاز
+    for pdf in all_pdfs:
+        if keyword in os.path.basename(pdf).lower():
+            return pdf
+            
+    # في حال لم يتم العثور على اسم مطابق تماماً، يتم ارجاع أول ملف كخيار افتراضي
+    return all_pdfs[0]
+
+@st.cache_resource
+def process_manuals_exact(device_name, root_dir="."):
+    chunks = []
+    pdf_path = get_device_pdf(device_name, root_dir)
+    
+    if not pdf_path or not os.path.exists(pdf_path):
         return None, []
 
-    for pdf_path in pdf_files:
-        try:
-            reader = PdfReader(pdf_path)
-            doc_name = os.path.basename(pdf_path)
-            for page_num, page in enumerate(reader.pages):
-                raw_text = page.extract_text()
-                if raw_text:
-                    cleaned_page = clean_extracted_text(raw_text)
-                    paragraphs = [
-                        p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action)\b)|(?<=\.)\s+', cleaned_page) 
-                        if len(p.strip()) > 25
-                    ]
-                    if not paragraphs and len(cleaned_page) > 20:
-                        paragraphs = [cleaned_page]
-                        
-                    for p in paragraphs:
-                        chunks.append({
-                            "text": p,
-                            "source": doc_name,
-                            "page": page_num + 1
-                        })
-        except Exception:
-            pass
+    try:
+        reader = PdfReader(pdf_path)
+        doc_name = os.path.basename(pdf_path)
+        for page_num, page in enumerate(reader.pages):
+            raw_text = page.extract_text()
+            if raw_text:
+                cleaned_page = clean_extracted_text(raw_text)
+                paragraphs = [
+                    p.strip() for p in re.split(r'(?=\b(?:Electric shock|Electrical safety|Sharps|Immediate action)\b)|(?<=\.)\s+', cleaned_page) 
+                    if len(p.strip()) > 25
+                ]
+                if not paragraphs and len(cleaned_page) > 20:
+                    paragraphs = [cleaned_page]
+                    
+                for p in paragraphs:
+                    chunks.append({
+                        "text": p,
+                        "source": doc_name,
+                        "page": page_num + 1
+                    })
+    except Exception:
+        pass
 
     if not chunks:
         return None, []
@@ -122,7 +138,7 @@ def handle_user_query(user_query, index, chunks, history, lang):
 
     # 3. البحث المباشر في المانيوال
     if index is None or not chunks:
-        return "⚠️ لم يتم العثور على ملفات المانيوال." if lang == "العربية" else "⚠️ Manual PDFs missing in repository."
+        return "⚠️ لم يتم العثور على ملفات المانيوال الخاصة بهذا الجهاز." if lang == "العربية" else "⚠️ Device manual PDF is missing."
 
     model = load_embedding_model()
     query_vector = model.encode([user_query], convert_to_numpy=True)
@@ -253,12 +269,14 @@ if st.session_state.selected_device is None:
         if st.button("Select cobas e 411", key="btn_e411", use_container_width=True, type="primary"):
             st.session_state.selected_device = "cobas e 411 analyzer"
             st.session_state.current_page = "AI"
+            st.session_state.last_page = 1
             st.rerun()
     with col2:
         st.markdown('<div class="contrast-card"><h2>cobas c 311 analyzer</h2><p>Clinical Chemistry System</p></div>', unsafe_allow_html=True)
         if st.button("Select cobas c 311", key="btn_c311", use_container_width=True, type="primary"):
             st.session_state.selected_device = "cobas c 311 analyzer"
             st.session_state.current_page = "AI"
+            st.session_state.last_page = 1
             st.rerun()
 else:
     nav1, nav2, nav3 = st.columns(3)
@@ -280,7 +298,7 @@ else:
     if st.session_state.current_page == "AI":
         st.markdown(f'<div class="contrast-card"><h3>🤖 Roche Assistant — {st.session_state.selected_device}</h3></div>', unsafe_allow_html=True)
         
-        index, chunks = process_manuals_exact(".")
+        index, chunks = process_manuals_exact(st.session_state.selected_device, ".")
             
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
@@ -305,11 +323,10 @@ else:
     elif st.session_state.current_page == "Manual":
         st.subheader(f"📖 Technical Documentation Visual Viewer — {st.session_state.selected_device}")
         
-        pdf_files = glob.glob("*.pdf") + glob.glob("*.pdf.pdf")
-        if pdf_files:
-            pdf_path = pdf_files[0]
-            
-            # فتح الـ PDF باستخدام PyMuPDF
+        pdf_path = get_device_pdf(st.session_state.selected_device, ".")
+        
+        if pdf_path and os.path.exists(pdf_path):
+            # فتح الـ PDF المخصص للجهاز المختار بـ PyMuPDF
             doc = fitz.open(pdf_path)
             total_pages = len(doc)
             
@@ -319,18 +336,12 @@ else:
             elif st.session_state.last_page > total_pages:
                 st.session_state.last_page = total_pages
 
-            # شريط التحكم والأزرار للتنقل السلس
-            col_prev, col_num, col_next, col_info = st.columns([1.5, 2, 1.5, 3])
+            # إدخال رقم السلايد مباشرة عبر صندوق إدخال بسيط بدون أزرار تنقل
+            col_num, col_info = st.columns([1, 2])
             
-            with col_prev:
-                if st.button("⬅️ السابق (Previous)", use_container_width=True):
-                    if st.session_state.last_page > 1:
-                        st.session_state.last_page -= 1
-                        st.rerun()
-                        
             with col_num:
                 page_input = st.number_input(
-                    f"رقم السلايد (1 - {total_pages})", 
+                    f"✏️ اكتب رقم السلايد (1 - {total_pages}):", 
                     min_value=1, 
                     max_value=total_pages, 
                     value=int(st.session_state.last_page),
@@ -341,14 +352,8 @@ else:
                     st.session_state.last_page = int(page_input)
                     st.rerun()
 
-            with col_next:
-                if st.button("التالي (Next) ➡️", use_container_width=True):
-                    if st.session_state.last_page < total_pages:
-                        st.session_state.last_page += 1
-                        st.rerun()
-
             with col_info:
-                st.markdown(f"#### 📄 السلايد المعروضة: **{st.session_state.last_page} من أصل {total_pages}**")
+                st.markdown(f"#### 📄 الملف: `{os.path.basename(pdf_path)}` — **السلايد {st.session_state.last_page} من أصل {total_pages}**")
 
             st.markdown("---")
             
@@ -362,7 +367,7 @@ else:
             st.image(img_bytes, caption=f"Slide / Page {target_page}", use_column_width=True)
             doc.close()
         else:
-            st.info("💡 PDF Manual file is missing in root repository.")
+            st.info(f"💡 Manual PDF for {st.session_state.selected_device} is missing in root repository.")
 
     elif st.session_state.current_page == "Parts":
         st.subheader(f"🔬 System Components — {st.session_state.selected_device}")
