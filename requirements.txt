@@ -6,3 +6,4 @@ google-genai
 langchain
 langchain-community
 streamlit-option-menu
+google-generativeai
