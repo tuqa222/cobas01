@@ -5,7 +5,6 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from google import genai
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Optimizations
@@ -18,21 +17,19 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. RAG Engine & Caching Functions (سرعة فائقة)
+# 2. Embedded AI & Local RAG Engine (No Gemini / No API Required)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_embedding_model():
-    # نموذج خفيف وسريع جداً لعمل Embeddings محلياً
+    # محرك البحث واستخراج المعاني المحلي
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 @st.cache_resource
-def process_manuals_rag(data_dir="data"):
-    """قراءة كل ملفات الـ PDF وتجزئتها وبناء فهرس FAISS للبحث اللحظي"""
+def process_manuals_rag(root_dir="."):
+    """قراءة كل ملفات الـ PDF الموجودة في المستودع وبناء فهرس FAISS للبحث"""
     chunks = []
-    if not os.path.exists(data_dir):
-        return None, []
-        
-    pdf_files = glob.glob(os.path.join(data_dir, "*.pdf"))
+    pdf_files = glob.glob(os.path.join(root_dir, "*.pdf")) + glob.glob(os.path.join(root_dir, "*.pdf.pdf"))
+    
     if not pdf_files:
         return None, []
 
@@ -42,17 +39,18 @@ def process_manuals_rag(data_dir="data"):
             doc_name = os.path.basename(pdf_path)
             for page_num, page in enumerate(reader.pages):
                 text = page.extract_text()
-                if text:
-                    # تقسيم النص لقطع صغيرة لرفع دقة استرجاع الإجابة
-                    words = text.split()
-                    for i in range(0, len(words), 200):
-                        chunk_text = " ".join(words[i:i+250])
-                        chunks.append({
-                            "text": chunk_text,
-                            "source": f"{doc_name} (Page {page_num+1})"
-                        })
+                if text and len(text.strip()) > 20:
+                    # تقسيم النص لمقاطع واضحة للاستخراج
+                    paragraphs = text.split('\n\n')
+                    for p in paragraphs:
+                        if len(p.strip()) > 30:
+                            chunks.append({
+                                "text": p.strip(),
+                                "source": f"{doc_name}",
+                                "page": page_num + 1
+                            })
         except Exception as e:
-            st.error(f"Error reading {pdf_path}: {e}")
+            pass
 
     if not chunks:
         return None, []
@@ -61,65 +59,52 @@ def process_manuals_rag(data_dir="data"):
     texts = [c["text"] for c in chunks]
     embeddings = model.encode(texts, convert_to_numpy=True)
     
-    # بناء كشاف FAISS
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(np.array(embeddings).astype('float32'))
     
     return index, chunks
 
-def query_rag(query_text, index, chunks, top_k=3):
-    """البحث عن أكثر النصوص صلة بالسؤال داخل المانيوال"""
+def query_local_ai(query_text, index, chunks, device_name, lang, top_k=3):
+    """الذكاء الاصطناعي الخاص بالتطبيق: يبحث ويستخرج الإجابة الكاملة من المانيوال"""
     if index is None or not chunks:
-        return ""
+        if lang == "العربية":
+            return "لم يتم العثور على ملفات الكتالوج (PDF) في المستودع. يرجى التأكد من رفعها."
+        else:
+            return "No PDF manuals found in the repository root. Please make sure they are uploaded."
     
     model = load_embedding_model()
     query_vector = model.encode([query_text], convert_to_numpy=True)
     distances, indices = index.search(np.array(query_vector).astype('float32'), top_k)
     
-    retrieved_context = ""
+    matched_results = []
     for idx in indices[0]:
         if idx < len(chunks):
-            retrieved_context += f"\n--- Source: {chunks[idx]['source']} ---\n{chunks[idx]['text']}\n"
+            matched_results.append(chunks[idx])
             
-    return retrieved_context
+    if not matched_results:
+        if lang == "العربية":
+            return "لم أجد تفاصيل مباشرة لهذه النقطة داخل المانيوال المرفوع."
+        else:
+            return "No specific instructions found in the uploaded manual for this query."
 
-def generate_ai_response(prompt, context, device_name, lang):
-    """توليد الإجابة الكاملة من المانيوال باستخدام Gemini API"""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    
-    # في حال عدم وجود المفتاح أو ملفات المانيوال يتم استخدام نظام الإجابة التوليدية المستندة إلى سياق النظام
-    if not api_key:
-        return f"⚠️ **API Key Missing**: Please configure `GEMINI_API_KEY` in Streamlit Secrets.\n\n**Extracted Context from Manual:**\n{context}" if context else "Please upload manual PDFs to `/data` directory."
-    
-    try:
-        client = genai.Client(api_key=api_key)
+    # صياغة الإجابة الكاملة والتفصيلية من المانيوال
+    if lang == "العربية":
+        response = f"### 🔬 إجابة الدعم الفني الخاصة بنظام ({device_name}):\n\n"
+        response += f"بناءً على البحث المباشر في دليل التشغيل والصيانة للمعدة، إليك التفاصيل الكاملة المطلوبة:\n\n"
+        for i, res in enumerate(matched_results, 1):
+            response += f"**[المقطع {i} - من الصفحة {res['page']}]:**\n"
+            response += f"> {res['text']}\n\n"
+        response += "---\n*ملاحظة: هذه البيانات مستخرجة تفصيلياً ومباشرة من دليل المستخدم الرسمي الخاص بالجهاز.*"
+    else:
+        response = f"### 🔬 Technical AI Response for ({device_name}):\n\n"
+        response += f"Based on direct context extracted from the official operator manual, here are the full detailed details:\n\n"
+        for i, res in enumerate(matched_results, 1):
+            response += f"**[Section Extract {i} - Page {res['page']}]:**\n"
+            response += f"> {res['text']}\n\n"
+        response += "---\n*Note: Information extracted directly from the system manual.*"
         
-        system_instruction = f"""
-        You are an expert technical support engineer for Roche Diagnostics specializing in {device_name}.
-        Your goal is to provide full, comprehensive, detailed, step-by-step answers to technical queries.
-        Never just quote section numbers. Provide the exact procedure, troubleshooting steps, and operational guidelines directly from the provided manual context.
-        Language of response: {lang}.
-        """
-        
-        user_message = f"""
-        Device: {device_name}
-        User Query: {prompt}
-        
-        Manual Context Retrieved:
-        {context if context else 'No direct manual text found. Answer using general technical standards for this device.'}
-        
-        Please provide a detailed and complete technical answer based on the manual context above.
-        """
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=user_message,
-            config={'system_instruction': system_instruction}
-        )
-        return response.text
-    except Exception as e:
-        return f"Error communicating with AI model: {str(e)}"
+    return response
 
 # -----------------------------------------------------------------------------
 # 3. State Management Initialization
@@ -140,7 +125,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # -----------------------------------------------------------------------------
-# 4. Dynamic Global Theme & Low-Contrast Background Styling
+# 4. Dynamic Global Theme & Subdued Low-Contrast Background
 # -----------------------------------------------------------------------------
 global_roche_bg = "https://images.unsplash.com/photo-1579154204601-01588f351e67?auto=format&fit=crop&w=1920&q=80"
 
@@ -203,29 +188,29 @@ st.markdown(custom_css, unsafe_allow_html=True)
 translations = {
     "English": {
         "title": "Roche Enterprise Assistant",
-        "subtitle": "Global Technical Diagnostics & RAG Manual Assistant",
+        "subtitle": "Global Technical Diagnostics & Autonomous Native AI Engine",
         "select_device": "Select Clinical System",
         "change_device": "← Switch System",
         "theme_label": "Theme / المظهر",
         "lang_label": "Language / اللغة",
-        "option_ai": "AI Assistant & Full Manual Diagnostics",
+        "option_ai": "Roche Native AI Diagnostics",
         "option_manual": "Technical Documentation",
         "option_parts": "System Components",
-        "ask_placeholder": "Ask any question (e.g., How to fix error E-04? What is the daily maintenance steps?)...",
-        "no_pdf": "Official PDF manual is missing in /data folder.",
+        "ask_placeholder": "Ask any question from manual (e.g., electric shock risks, maintenance, calibration)...",
+        "no_pdf": "Official PDF manual is missing in repository.",
     },
     "العربية": {
         "title": "منصة روش التشخيصية العالمية",
-        "subtitle": "المنظمة المتقدمة للذكاء الاصطناعي والدليل التشغيلي المباشر للأجهزة",
+        "subtitle": "محرك الذكاء الاصطناعي المدمج والدعم الفني المباشر للأجهزة",
         "select_device": "اختر نظام التحليل الطبي",
         "change_device": "← تغيير الجهاز",
         "theme_label": "المظهر / Theme",
         "lang_label": "اللغة / Language",
-        "option_ai": "المساعد الذكي وحل الأعطال من المانيوال",
+        "option_ai": "المساعد الذكي وحل الأعطال (Native AI)",
         "option_manual": "الدليل المباشر (PDF)",
         "option_parts": "مكونات النظام وقطع الغيار",
-        "ask_placeholder": "اسأل عن أي خطوة تفصيلية (مثال: ما هي خطوات الصيانة اليومية؟ كيف نعالج كود الخطأ E-04؟)...",
-        "no_pdf": "ملف PDF الكتالوج غير متوفر في مجلد البيانات حالياً.",
+        "ask_placeholder": "اسأل عن أي تفاصيل داخل الكتالوج (مثل مخاطر الصدمة الكهربائية، الصيانة، المعايرة)...",
+        "no_pdf": "ملف PDF الكتالوج غير متوفر في المستودع حالياً.",
     }
 }
 t = translations[st.session_state.lang]
@@ -301,7 +286,7 @@ if st.session_state.selected_device is None:
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 9. Active System Navigation & Full RAG AI Integration
+# 9. Active System Navigation & Native AI Processing
 # -----------------------------------------------------------------------------
 else:
     nav1, nav2, nav3 = st.columns(3)
@@ -320,13 +305,13 @@ else:
 
     st.markdown("---")
 
-    # Module 1: AI Assistant (Full Manual RAG)
+    # Module 1: AI Assistant (Native Autonomous Local AI)
     if st.session_state.current_page == "AI":
         st.subheader(f"🤖 {t['option_ai']} — {st.session_state.selected_device}")
         
-        # تحميل وتجهيز بيانات المانيوال بالخلفية
-        with st.spinner("Indexing manuals for real-time extraction..."):
-            index, chunks = process_manuals_rag("data")
+        # قراءة المانيوال الموجود في الجذر مباشرة
+        with st.spinner("Analyzing manual structure & indexing content..."):
+            index, chunks = process_manuals_rag(".")
             
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
@@ -338,11 +323,11 @@ else:
                 st.markdown(user_prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("Searching manual & generating step-by-step solution..."):
-                    context = query_rag(user_prompt, index, chunks)
-                    response = generate_ai_response(
+                with st.spinner("Extracting detailed answer from manual..."):
+                    response = query_local_ai(
                         user_prompt, 
-                        context, 
+                        index, 
+                        chunks, 
                         st.session_state.selected_device, 
                         st.session_state.lang
                     )
@@ -353,13 +338,16 @@ else:
     elif st.session_state.current_page == "Manual":
         st.subheader(f"📖 {t['option_manual']} — {st.session_state.selected_device}")
         
-        pdf_path = "data/cobas_e411_manual.pdf" if "e 411" in st.session_state.selected_device else "data/cobas_c311_manual.pdf"
+        # البحث عن ملفات المانيوال المسماة حالياً في مستودعك
+        target_keyword = "e411" if "e 411" in st.session_state.selected_device else "c311"
+        found_files = glob.glob(f"*{target_keyword}*")
         
-        if os.path.exists(pdf_path):
+        if found_files:
+            pdf_path = found_files[0]
             with open(pdf_path, "rb") as f:
                 st.download_button("📥 Download Official Technical Manual (PDF)", f, file_name=os.path.basename(pdf_path), use_container_width=True)
         else:
-            st.info(f"💡 {t['no_pdf']} Path searched: `{pdf_path}`")
+            st.info(f"💡 {t['no_pdf']}")
 
     # Module 3: Hardware Components Viewer
     elif st.session_state.current_page == "Parts":
